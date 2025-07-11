@@ -212,9 +212,9 @@ def apply_dict_patch(
 
 
 def catch_bytes_diff(
-        base_bytes_dict: Dict[int, bytes],
-        target_bytes_dict: Dict[int, bytes]
-) -> Tuple[Dict[int, bytes], Dict[int, bytes]]:
+        base_bytes_dict: Dict[int, bytearray],
+        target_bytes_dict: Dict[int, bytearray]
+) -> Tuple[Dict[int, bytes], Dict[int, bytearray]]:
     """
     Compare the two byte dictionaries and return different key-value pairs of target_bytes relative to base_bytes.
 
@@ -224,7 +224,7 @@ def catch_bytes_diff(
     :return new_entries: Dictionary of new key-value pairs
     """
     patches: Dict[int, bytes] = {}
-    new_entries: Dict[int, bytes] = {}
+    new_entries: Dict[int, bytearray] = {}
 
 
     for addr,target_bytes in target_bytes_dict.items():
@@ -239,10 +239,10 @@ def catch_bytes_diff(
     return patches, new_entries
 
 def apply_bytes_patch(
-        base_bytes_dict: Dict[int, bytes],
+        base_bytes_dict: Dict[int, bytearray],
         patches: Dict[int, bytes],
-        new_entries: Dict[int, bytes]
-) -> Dict[int, bytes]:
+        new_entries: Dict[int, bytearray]
+) -> Dict[int, bytearray]:
     """
     Apply the generated patches to the base data dictionary and merge new entries.
 
@@ -253,7 +253,7 @@ def apply_bytes_patch(
     Returns:
         Updated dictionary with applied diffs and new entries
     """
-    updated_dict = dict(base_bytes_dict)
+    updated_dict: Dict[int, bytearray] = dict(base_bytes_dict)
 
     for addr, patch in patches.items():
         if patch == b'':
@@ -395,14 +395,14 @@ def tte_log_err(message):
 
 @dataclass
 class EmuSettings():
-    start = 0x140001FE2#start#
+    start = 0x140001450#start#
     end = -1#0x14000201C#end#
     # emulate_step_limit = 10
     is_load_registers = False
     is_emulate_external_calls = False
     is_log = True
     time_out = 0  #TODO: add it in emusetting form
-    count = 10  #TODO: add it in emusetting form
+    count = 100  #TODO: add it in emusetting form
     log_level = logging.DEBUG #TODO: add it in emusetting form
 
 
@@ -783,10 +783,10 @@ class FullEmuState(EmuState):
         self.type = EmuState.STATE_TYPE_FULL
 
         self.registers_map: Dict[str, int] = {} # {reg_name: reg_value}
-        self.memory_pages: Dict[int, bytes] = {} # {page_start: page_data}
+        self.memory_pages: Dict[int, bytearray] = {} # {page_start: page_data}
 
 
-    def set_data(self, registers_map: Dict[str, int], memory_pages: Dict[int, bytes]) -> None:
+    def set_data(self, registers_map: Dict[str, int], memory_pages: Dict[int, bytearray]) -> None:
         """
         Set the full state of the emulator.
         :param registers: Dictionary of register values.
@@ -829,6 +829,10 @@ class LightPatchEmuState(EmuState):
     def generate_full_state(self, states_dict: Dict[str, EmuState]) -> Optional[FullEmuState]:
         target_state = FullEmuState(self.state_id, self.instruction_address, self.execution_count)
 
+        assert self.base_full_state_id is not None, "Generate full State: Cannot generate full state: base state id not set."
+        base_full_state: Optional[EmuState] = states_dict.get(self.base_full_state_id)
+        assert base_full_state is not None, f"Generate full State: Cannot generate full state for {self.base_full_state_id}: base state not found."
+        assert isinstance(base_full_state, FullEmuState), f"Generate full State: Cannot generate full state for {self.base_full_state_id}: base state is not a full state."
 
         while self.prev_state_id is not None:
             prev_state = states_dict.get(self.prev_state_id)
@@ -837,9 +841,9 @@ class LightPatchEmuState(EmuState):
                 return None
 
             if prev_state.type in [EmuState.STATE_TYPE_FULL, EmuState.STATE_TYPE_HEAVY_PATCH]:
-                base_full_state: Optional[EmuState] = prev_state.generate_full_state(states_dict)
-                assert base_full_state is not None, "Generate full State: Cannot generate full state for previous state."
-                assert isinstance(base_full_state, FullEmuState), "Generate full State: Previous state is not a full state."
+                prev_full_state: Optional[EmuState] = prev_state.generate_full_state(states_dict)
+                assert prev_full_state is not None, "Generate full State: Cannot generate full state for previous state."
+                assert isinstance(prev_full_state, FullEmuState), "Generate full State: Previous state is not a full state."
                 break;
             elif prev_state.type == EmuState.STATE_TYPE_LIGHT_PATCH:
                 assert isinstance(prev_state, LightPatchEmuState), "Generate full State: Previous state is not a light patch state."
@@ -847,11 +851,14 @@ class LightPatchEmuState(EmuState):
                 self.prev_state_id = prev_state.prev_state_id
 
         target_state.registers_map = apply_dict_patch(base_full_state.registers_map, self.reg_patches)
-        target_state.memory_pages = base_full_state.memory_pages.copy()
+        target_state.memory_pages = prev_full_state.memory_pages.copy()
         while len(self.mem_patches) != 0:
             addr, size, value = self.mem_patches.pop()
             value = value.to_bytes(size, byteorder = 'big' if get_is_be() else 'little')
-            target_state.memory_pages[addr] = value
+
+            align_addr = addr & PAGE_MASK
+            offset = addr & ~(PAGE_MASK)
+            target_state.memory_pages[align_addr][offset:offset+size] = value
         return target_state
 
 
@@ -874,9 +881,9 @@ class HeavyPatchEmuState(EmuState):
 
         # Memory patch stores binary differential data generated by bsdiff4
         self.mem_bsdiff_patches: Dict[int, bytes] = {} # {page_start: bsdiff_patch_bytes}
-        self.new_pages: Dict[int, bytes] = {} # {page_start: page_data}
+        self.new_pages: Dict[int, bytearray] = {} # {page_start: page_data}
 
-    def set_data(self, base_full_state_id: str, reg_patches: Dict[str, int], mem_bsdiff_patches: Dict[int, bytes], new_pages: Dict[int, bytes]):
+    def set_data(self, base_full_state_id: str, reg_patches: Dict[str, int], mem_bsdiff_patches: Dict[int, bytes], new_pages: Dict[int, bytearray]):
         """
         Sets the patch status of the emulator.
 
@@ -951,7 +958,7 @@ class EmuStateManager():
         return self.STATE_ID_FORMAT.format(address=instruction_address, count=count)
 
 
-    def _read_memory_pages(self, uc, memory_regions: Iterator[Tuple[int, int, int]]) -> Dict[int, bytes]:
+    def _read_memory_pages(self, uc, memory_regions: Iterator[Tuple[int, int, int]]) -> Dict[int, bytearray]:
         """
         Read paging memory from Unicorn instance.
 
@@ -959,7 +966,7 @@ class EmuStateManager():
         :param memory_regions: A list of memory regions to read.
         :return: A dictionary of memory pages, where the key is the start address of the page and the value is the page data.
         """
-        memory_pages = {}
+        memory_pages: Dict[int, bytearray] = {}
         for start, end, _ in memory_regions:
             size = end - start + 1
             try:
@@ -974,7 +981,7 @@ class EmuStateManager():
         return memory_pages
 
 
-    def _create_full_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, bytes], mem_patches: List[Tuple[int, int, int]]) -> None:
+    def _create_full_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, bytearray], mem_patches: List[Tuple[int, int, int]]) -> None:
         new_state = FullEmuState(new_state_id)
         new_state.set_data(current_registers_map, current_memory_pages)
 
@@ -1008,7 +1015,7 @@ class EmuStateManager():
         tte_log_dbg(f"State Manager: Created LIGHT PATCH state: {new_state_id}, base:{new_state.base_full_state_id},  prev: {new_state.prev_state_id}")
 
 
-    def _create_heavy_patch_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, bytes]) -> None:
+    def _create_heavy_patch_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, bytearray]) -> None:
         assert self.last_full_state_id is not None, "No full base state available for patch creation."
 
         base_full_state: Optional[FullEmuState] = self.get_state(self.last_full_state_id) # type: ignore
@@ -1074,6 +1081,8 @@ class EmuStateManager():
         tte_log_dbg(f"State Manager: Create state at 0x{instruction_address:X}")
         new_state_id = self._generate_state_id(instruction_address)
 
+        # #TODO testing: remove later
+        # current_memory_pages = None #   type: ignore
 
         # Read the registers of unicorn instance
         current_registers_map = {
@@ -1096,13 +1105,39 @@ class EmuStateManager():
             # Create a light patch status
             self._create_ligth_patch_state(new_state_id, current_registers_map, mem_patches)
 
+        # #TODO testing
+        # if current_memory_pages == None: #   type: ignore
+        #     current_memory_pages= self._read_memory_pages(uc, memory_regions)
+        # self.__test__(new_state_id,current_registers_map, current_memory_pages)
 
-        t = self.get_state(new_state_id)
-        assert t is not None, "State not found"
-        t.generate_full_state(self.states_dict)
-        tte_log_dbg(f"State Manager: Test Pass: generate no error")
 
+    # #TODO testing func: remove later
+    # def __test__(self,new_state_id,current_registers_map ,current_memory_pages):
+    #     st1 = self.get_state(new_state_id)
+    #     assert st1 is not None, "State not found"
+    #     st2 = st1.generate_full_state(self.states_dict)
+    #     tte_log_dbg(f"State Manager: Test Pass: generate no error")
 
+    #     st3 = FullEmuState(new_state_id)
+    #     st3.set_data(current_registers_map, current_memory_pages) #   type: ignore
+    #     try:
+    #         assert(st2.registers_map == st3.registers_map) #   type: ignore
+    #     except:
+    #         tte_log_dbg("Cheack reg Fail")
+    #         print("st1 patch ",st1.reg_patches) #   type: ignore
+    #         print("st2  ",st2.registers_map) #   type: ignore
+    #         print("st1  ",st3.registers_map)
+
+    #     tte_log_dbg("Cheack regs Pass")
+    #     try:
+    #         assert(st2.memory_pages == st3.memory_pages) #   type: ignore
+    #         tte_log_dbg("Cheack mem Pass")
+    #     except:
+    #         tte_log_dbg("Cheack mem Fail")
+    #         print(st2.memory_pages) #   type: ignore
+    #         print(st3.memory_pages)
+
+    #         # print(self.get_state(st1.prev_state_id).generate_full_state(self.states_dict).__dict__)  #   type: ignore
 
 
 
