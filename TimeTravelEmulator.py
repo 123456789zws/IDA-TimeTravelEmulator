@@ -9,19 +9,16 @@ import ida_segment
 
 from abc import ABC
 from collections import defaultdict
-from typing import Dict, Final, Iterator, List, Literal, Optional, Tuple, Union
-from struct import pack, unpack
+from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
 from copy import deepcopy
 from attr import dataclass
 
 
 
 import bsdiff4
-from sympy import E
 from unicorn import *
 from unicorn.x86_const import *
 from capstone import *
-import capstone
 
 
 
@@ -35,7 +32,8 @@ PLUGIN_HOTKEY = 'Shift+T'
 PAGE_SIZE = 0x1000
 PAGE_MASK = ~(PAGE_SIZE - 1)
 
-
+# Define default page permission
+DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
 
 
 
@@ -124,7 +122,11 @@ UNICORN_REGISTERS_MAP = {
 }
 
 
-
+IDA_PERM_TO_UC_PERM_MAP = {
+    ida_segment.SEGPERM_EXEC : UC_PROT_EXEC,
+    ida_segment.SEGPERM_WRITE : UC_PROT_WRITE,
+    ida_segment.SEGPERM_READ : UC_PROT_READ
+}
 
 
 def get_bitness() -> Union[None, Literal[64], Literal[32]]:
@@ -157,8 +159,6 @@ def get_arch() -> str:
     return IDA_PROC_TO_ARCH_MAP[(proc_name, proc_bitness)]
 
 
-
-
 def get_slice_segment(page_size: int) -> "defaultdict[int, List[Tuple[int, int]]]":
     """
     Slice the segment into pages of the given size.
@@ -188,6 +188,28 @@ def get_slice_segment(page_size: int) -> "defaultdict[int, List[Tuple[int, int]]
 
     return result
 
+def get_segment_prem(addr: int) -> int:
+    seg = ida_segment.getseg(addr)
+    if seg is not None:
+        ida_perm = seg.perm
+        uc_perm = 0
+        for ida_bit, uc_bit in IDA_PERM_TO_UC_PERM_MAP.items():
+            if ida_perm & ida_bit:
+                uc_perm |= uc_bit
+        return uc_perm
+    return DEFAULT_PAGE_PERMISSION
+
+
+def is_address_range_loaded(start_ea, end_ea) -> bool:
+    """
+    Check if the given address range is loaded into the database.
+    """
+    tte_log_dbg(f"Checking if address range {hex(start_ea)} - {hex(end_ea)} is loaded...")
+    if start_ea < ida_ida.inf_get_min_ea() or end_ea > ida_ida.inf_get_max_ea():
+        return False
+    return ida_bytes.next_that(start_ea - 1, end_ea + 1, lambda flags: ida_bytes.has_value(flags)) != idaapi.BADADDR
+
+
 
 def catch_dict_diff(
         base_dict: Dict[str, int],
@@ -212,76 +234,63 @@ def apply_dict_patch(
 
 
 def catch_bytes_diff(
-        base_bytes_dict: Dict[int, bytearray],
-        target_bytes_dict: Dict[int, bytearray]
-) -> Tuple[Dict[int, bytes], Dict[int, bytearray]]:
+        base_bytes_dict: Dict[int, Tuple[int, bytearray]], #
+        target_bytes_dict: Dict[int, Tuple[int, bytearray]]
+) -> Tuple[Dict[int, Tuple[int, bytes]], Dict[int, Tuple[int, bytearray]]]:
     """
     Compare the two byte dictionaries and return different key-value pairs of target_bytes relative to base_bytes.
 
-    :param base_bytes_dict: Original dictionary of bytes (base data)
-    :param target_bytes_dict: Dictionary of bytes to be compared with base_bytes_dict
-    :return patches: Dictionary of binary diffs for modified keys
-    :return new_entries: Dictionary of new key-value pairs
+    :param base_bytes_dict: Original dictionary of bytes  {addr: (permission, data)}
+    :param target_bytes_dict: Dictionary of bytes to be compared with base_bytes_dict  {addr: (permission, data)}
+    :return patches: Dictionary of binary diffs for modified keys  {addr: (permission, patch)}
+    :return new_entries: Dictionary of new key-value pairs  {addr: (permission, data)}
     """
-    patches: Dict[int, bytes] = {}
-    new_entries: Dict[int, bytearray] = {}
+    patches: Dict[int, Tuple[int, bytes]] = {}
+    new_entries: Dict[int, Tuple[int, bytearray]] = {}
 
 
-    for addr,target_bytes in target_bytes_dict.items():
-        base_bytes = base_bytes_dict.get(addr)
-        if base_bytes is None:
-            new_entries[addr] = target_bytes
-        elif base_bytes != target_bytes:
-            patches[addr] = bsdiff4.diff(base_bytes, target_bytes)
+    for addr, (permossion, target_bytes) in target_bytes_dict.items():
+        entry = base_bytes_dict.get(addr)
+        if entry is None:
+            new_entries[addr] = (permossion, target_bytes)
+            continue
+        _, base_bytes = entry
+        if base_bytes != target_bytes:
+            patches[addr] = (permossion, bsdiff4.diff(base_bytes, target_bytes))
         else:
-            patches[addr] = b''
+            patches[addr] = (permossion, b'')
 
     return patches, new_entries
 
 def apply_bytes_patch(
-        base_bytes_dict: Dict[int, bytearray],
-        patches: Dict[int, bytes],
-        new_entries: Dict[int, bytearray]
-) -> Dict[int, bytearray]:
+        base_bytes_dict: Dict[int, Tuple[int, bytearray]],
+        patches: Dict[int, Tuple[int, bytes]],
+        new_entries: Dict[int, Tuple[int, bytearray]]
+) -> Dict[int, Tuple[int, bytearray]]:
     """
     Apply the generated patches to the base data dictionary and merge new entries.
 
-    :param base_bytes_dict: Original dictionary of bytes (base data)
-    :param patches: Dictionary of binary diffs for modified keys
-    :return new_entries: Dictionary of new key-value pairs
-
-    Returns:
-        Updated dictionary with applied diffs and new entries
+    :param base_bytes_dict: Original dictionary of bytes  {addr: (permission, data)}
+    :param patches: Dictionary of binary diffs for modified keys  {addr: (permission, patch)}
+    :param new_entries: Dictionary of new key-value pairs  {addr: (permission, data)}
+    :return updated_dict: Updated dictionary with applied diffs and new entries  {addr: (permission, data)}
     """
-    updated_dict: Dict[int, bytearray] = dict(base_bytes_dict)
+    updated_dict: Dict[int, Tuple[int, bytearray]] = dict(base_bytes_dict)
 
-    for addr, patch in patches.items():
+    for addr, (permossion, patch) in patches.items():
         if patch == b'':
             continue
-        original_data = updated_dict.get(addr)
-        assert original_data is not None, f"Error: key {addr} not found in base_bytes_dict"
+        key_data = updated_dict.get(addr)
+        assert key_data is not None, f"Error: key {addr} not found in base_bytes_dict"
+        _, original_data = key_data
         try:
             patched_data = bsdiff4.patch(original_data, patch)
-            updated_dict[addr] = patched_data
+            updated_dict[addr] = (permossion, patched_data)
         except Exception as e:
             raise RuntimeError(f"Error applying patch to key {addr}: {e}")
 
     updated_dict.update(new_entries)
     return updated_dict
-
-
-
-
-
-def is_address_range_loaded(start_ea, end_ea) -> bool:
-    """
-    Check if the given address range is loaded into the database.
-    """
-    tte_log_dbg(f"Checking if address range {hex(start_ea)} - {hex(end_ea)} is loaded...")
-    if start_ea < ida_ida.inf_get_min_ea() or end_ea > ida_ida.inf_get_max_ea():
-        return False
-    return ida_bytes.next_that(start_ea - 1, end_ea + 1, lambda flags: ida_bytes.has_value(flags)) != idaapi.BADADDR
-
 
 
 
@@ -401,8 +410,9 @@ class EmuSettings():
     is_load_registers = False
     is_emulate_external_calls = False
     is_log = True
+    is_map_mem_permissions = True
     time_out = 0  #TODO: add it in emusetting form
-    count = 100  #TODO: add it in emusetting form
+    count = 300  #TODO: add it in emusetting form
     log_level = logging.DEBUG #TODO: add it in emusetting form
 
 
@@ -586,8 +596,9 @@ class EmuExecuter():
             if self._is_memory_mapped(page_start):
                 continue
             try:
-                self.mu.mem_map(page_start, PAGE_SIZE)
-                tte_log_info(f"Map memory: 0x{page_start:X}~0x{page_start + PAGE_SIZE - 1 :X}")
+                perm = get_segment_prem(page_start)
+                self.mu.mem_map(page_start, PAGE_SIZE, perm)
+                tte_log_info(f"Map memory: 0x{page_start:X}~0x{page_start + PAGE_SIZE - 1 :X} by permission {perm}")
             except UcError as e:
                 tte_log_warn(f"Mapping memory failed: {e}")
 
@@ -694,7 +705,13 @@ class EmuExecuter():
         """
         tte_log_info(f"Run emulation: 0x{self.settings.start:X}~0x{self.settings.end:X}, count {self.settings.count}")
 
-        self.mu.emu_start(self.settings.start, self.settings.end, 0, self.settings.count)
+        try:
+            self.mu.emu_start(self.settings.start, self.settings.end, 0, self.settings.count)
+        except UcError as e:
+            tte_log_err(f"Emulation failed: {e}")
+
+
+
 
         tte_log_info(f"Emulation ended: 0x{self.mu.reg_read(self.insn_pointer):X}")
         tte_log_dbg("Emulation: Start calling end callback functions.")
@@ -783,10 +800,10 @@ class FullEmuState(EmuState):
         self.type = EmuState.STATE_TYPE_FULL
 
         self.registers_map: Dict[str, int] = {} # {reg_name: reg_value}
-        self.memory_pages: Dict[int, bytearray] = {} # {page_start: page_data}
+        self.memory_pages: Dict[int, Tuple[int, bytearray]] = {} # {page_start: (page_permissions, page_data)}
 
 
-    def set_data(self, registers_map: Dict[str, int], memory_pages: Dict[int, bytearray]) -> None:
+    def set_data(self, registers_map: Dict[str, int], memory_pages: Dict[int, Tuple[int, bytearray]]) -> None:
         """
         Set the full state of the emulator.
         :param registers: Dictionary of register values.
@@ -852,13 +869,18 @@ class LightPatchEmuState(EmuState):
 
         target_state.registers_map = apply_dict_patch(base_full_state.registers_map, self.reg_patches)
         target_state.memory_pages = prev_full_state.memory_pages.copy()
-        while len(self.mem_patches) != 0:
+        target_memory_pages = prev_full_state.memory_pages.copy()
+        while self.mem_patches:
             addr, size, value = self.mem_patches.pop()
-            value = value.to_bytes(size, byteorder = 'big' if get_is_be() else 'little')
+            value = value.to_bytes(size, byteorder='big' if get_is_be() else 'little')
 
             align_addr = addr & PAGE_MASK
-            offset = addr & ~(PAGE_MASK)
-            target_state.memory_pages[align_addr][offset:offset+size] = value
+            offset = addr & ~PAGE_MASK
+
+            assert align_addr in target_memory_pages, "Generate full State: Cannot apply memory patch: address not found in memory pages."
+            _, page_data = target_memory_pages[align_addr]
+            page_data[offset : offset + size] = value
+        target_state.memory_pages = target_memory_pages
         return target_state
 
 
@@ -880,10 +902,10 @@ class HeavyPatchEmuState(EmuState):
         self.reg_patches: Dict[str, int] = {} # {reg_name: patch_value}
 
         # Memory patch stores binary differential data generated by bsdiff4
-        self.mem_bsdiff_patches: Dict[int, bytes] = {} # {page_start: bsdiff_patch_bytes}
-        self.new_pages: Dict[int, bytearray] = {} # {page_start: page_data}
+        self.mem_bsdiff_patches: Dict[int, Tuple[int, bytes]] = {} # {page_start: (page_permissions, bsdiff_patch_bytes)}
+        self.new_pages: Dict[int, Tuple[int, bytearray]] = {} # {page_start: (page_permissions, page_data)}
 
-    def set_data(self, base_full_state_id: str, reg_patches: Dict[str, int], mem_bsdiff_patches: Dict[int, bytes], new_pages: Dict[int, bytearray]):
+    def set_data(self, base_full_state_id: str, reg_patches: Dict[str, int], mem_bsdiff_patches: Dict[int, Tuple[int, bytes]], new_pages: Dict[int, Tuple[int, bytearray]]):
         """
         Sets the patch status of the emulator.
 
@@ -958,7 +980,7 @@ class EmuStateManager():
         return self.STATE_ID_FORMAT.format(address=instruction_address, count=count)
 
 
-    def _read_memory_pages(self, uc, memory_regions: Iterator[Tuple[int, int, int]]) -> Dict[int, bytearray]:
+    def _read_memory_pages(self, uc, memory_regions: Iterator[Tuple[int, int, int]]) -> Dict[int, Tuple[int, bytearray]]:
         """
         Read paging memory from Unicorn instance.
 
@@ -966,13 +988,13 @@ class EmuStateManager():
         :param memory_regions: A list of memory regions to read.
         :return: A dictionary of memory pages, where the key is the start address of the page and the value is the page data.
         """
-        memory_pages: Dict[int, bytearray] = {}
-        for start, end, _ in memory_regions:
+        memory_pages: Dict[int, Tuple[int, bytearray]] = {}
+        for start, end, permission in memory_regions:
             size = end - start + 1
             try:
                 # Try to read a memory page
                 page_data = uc.mem_read(start, size)
-                memory_pages[start] = page_data
+                memory_pages[start] = (permission, page_data)
                 tte_log_dbg(f"State Manager: Read memory page at 0x{start:X}, size {size}")
             except Exception as e:
                 # If memory area may not be mapped, skipped and log
@@ -981,7 +1003,7 @@ class EmuStateManager():
         return memory_pages
 
 
-    def _create_full_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, bytearray], mem_patches: List[Tuple[int, int, int]]) -> None:
+    def _create_full_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, Tuple[int, bytearray]], mem_patches: List[Tuple[int, int, int]]) -> None:
         new_state = FullEmuState(new_state_id)
         new_state.set_data(current_registers_map, current_memory_pages)
 
@@ -1015,7 +1037,7 @@ class EmuStateManager():
         tte_log_dbg(f"State Manager: Created LIGHT PATCH state: {new_state_id}, base:{new_state.base_full_state_id},  prev: {new_state.prev_state_id}")
 
 
-    def _create_heavy_patch_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, bytearray]) -> None:
+    def _create_heavy_patch_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, Tuple[int,bytearray]]) -> None:
         assert self.last_full_state_id is not None, "No full base state available for patch creation."
 
         base_full_state: Optional[FullEmuState] = self.get_state(self.last_full_state_id) # type: ignore
@@ -1081,8 +1103,8 @@ class EmuStateManager():
         tte_log_dbg(f"State Manager: Create state at 0x{instruction_address:X}")
         new_state_id = self._generate_state_id(instruction_address)
 
-        # #TODO testing: remove later
-        # current_memory_pages = None #   type: ignore
+        #TODO testing: remove later
+        current_memory_pages = None #   type: ignore
 
         # Read the registers of unicorn instance
         current_registers_map = {
@@ -1136,7 +1158,6 @@ class EmuStateManager():
     #         tte_log_dbg("Cheack mem Fail")
     #         print(st2.memory_pages) #   type: ignore
     #         print(st3.memory_pages)
-
     #         # print(self.get_state(st1.prev_state_id).generate_full_state(self.states_dict).__dict__)  #   type: ignore
 
 
