@@ -768,31 +768,6 @@ class EmuState(ABC):
     def generate_full_state(self, states_dict: Dict[str, 'EmuState']) -> Optional['FullEmuState']:
         pass
 
-    @staticmethod
-    def compare_states(state_manager: 'EmuStateManager', state1: 'EmuState', state2: 'EmuState'):
-        """
-        Compares any two EmuState objects (full or patch) and returns their differences.
-
-        :param EmuStateManager: An instance of EmuStateManager to extract full states if needed.
-        :param state1: The first EmuState object.
-        :param state2: The second EmuState object.
-        :return: A tuple (reg_diff, mem_patches_list) representing the differences.
-                 reg_diff: Dict of changed registers in state2 relative to state1.
-                 mem_patches_list: List of memory patches from state1 to state2.
-        """
-        pass
-#TODO
-        # if state1.type == EmuState.STATE_TYPE_FULL and state2.type == EmuState.STATE_TYPE_FULL:
-        #     pass
-
-        # elif state1.type == EmuState.STATE_TYPE_PATCH or state2.type == EmuState.STATE_TYPE_PATCH:
-        #     if state1.prev_state_id == state2.prev_state_id:
-        #         pass
-
-        #     else:
-        #         pass
-        # else:
-        #     pass
 
 class FullEmuState(EmuState):
     def __init__(self, state_id: str, instruction_address: int = -1, execution_count: int = -1) -> None:
@@ -816,7 +791,6 @@ class FullEmuState(EmuState):
         return deepcopy(self)
 
 
-
 class LightPatchEmuState(EmuState):
     def __init__(self, state_id: str, instruction_address: int = -1, execution_count: int = -1) -> None:
         super().__init__(state_id, instruction_address, execution_count)
@@ -827,7 +801,6 @@ class LightPatchEmuState(EmuState):
 
         self.reg_patches: Dict[str, int] = {} # {reg_name: patch_value}
         self.mem_patches: List[Tuple[int, int, int]] = [] # List[[address, size, value]...]
-
 
 
     def set_data(self, base_full_state_id: str, prev_state_id: str, reg_patches: Dict[str, int], mem_patches: List[Tuple[int, int, int]]):
@@ -884,14 +857,6 @@ class LightPatchEmuState(EmuState):
         return target_state
 
 
-
-
-
-
-
-
-
-
 class HeavyPatchEmuState(EmuState):
     def __init__(self, state_id: str, instruction_address: int = -1, execution_count: int = -1) -> None:
         super().__init__(state_id, instruction_address, execution_count)
@@ -935,13 +900,6 @@ class HeavyPatchEmuState(EmuState):
 
 
 
-
-
-
-
-
-
-
 class EmuStateManager():
     """
     Class responsible for storing and managing all EmuState objects.
@@ -968,12 +926,13 @@ class EmuStateManager():
         self.heavy_patch_count: int = 0 # Number of heavy patches created
         self.cumulative_diff_size: int = 0 # Cumulative difference size (used to determine whether to create a complete snapshot)
 
-        self.has_map_memory = False # Whether the binary has been loaded or not
+        self.has_map_memory = False # Whether the uc instance has mapped new memory page or not
+
 
     def _generate_state_id(self, instruction_address: int) -> str:
         """
         Generate a unique state ID based on the instruction address and the number of executions.
-        Format: "$0x<hex_addr>#<count>"
+        Format: "<hex_addr><count>"
         """
         self.instruction_execution_counts[instruction_address] +=1
         count = self.instruction_execution_counts[instruction_address]
@@ -985,8 +944,9 @@ class EmuStateManager():
         Read paging memory from Unicorn instance.
 
         :param uc: The Unicorn instance.
-        :param memory_regions: A list of memory regions to read.
-        :return: A dictionary of memory pages, where the key is the start address of the page and the value is the page data.
+        :param memory_regions: A list of memory regions to read.  Iterator(Tuple[start, end, permission])
+        :return: A dictionary of memory pages, where the key is the start address of
+         the page and the value is the page's permission and data.
         """
         memory_pages: Dict[int, Tuple[int, bytearray]] = {}
         for start, end, permission in memory_regions:
@@ -1003,8 +963,14 @@ class EmuStateManager():
         return memory_pages
 
 
-    def _create_full_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, Tuple[int, bytearray]], mem_patches: List[Tuple[int, int, int]]) -> None:
-        new_state = FullEmuState(new_state_id)
+    def _create_full_state(self,
+                           new_state_id: str,
+                           instruction_address:int,
+                           current_registers_map: Dict[str, int],
+                           current_memory_pages: Dict[int, Tuple[int, bytearray]]) -> None:
+        new_state = FullEmuState(new_state_id,
+                                 instruction_address,
+                                 self.instruction_execution_counts[instruction_address])
         new_state.set_data(current_registers_map, current_memory_pages)
 
         self.states_dict[new_state_id] = new_state
@@ -1016,7 +982,11 @@ class EmuStateManager():
         tte_log_dbg(f"State Manager: Created FULL state: {new_state_id}")
 
 
-    def _create_ligth_patch_state(self, new_state_id: str, current_registers_map: Dict[str, int], mem_patches: List[Tuple[int, int, int]]) -> None:
+    def _create_light_patch_state(self,
+                                  new_state_id: str,
+                                  instruction_address:int,
+                                  current_registers_map: Dict[str, int],
+                                  mem_patches: List[Tuple[int, int, int]]) -> None:
         assert self.last_full_state_id is not None, "No full base state available for patch creation."
         assert self.last_state_id is not None, "No previous state available for patch creation."
 
@@ -1026,7 +996,9 @@ class EmuStateManager():
 
         reg_patches = catch_dict_diff(base_full_state.registers_map, current_registers_map)
 
-        new_state = LightPatchEmuState(state_id=new_state_id)
+        new_state = LightPatchEmuState(new_state_id,
+                                       instruction_address,
+                                       self.instruction_execution_counts[instruction_address])
         new_state.set_data(self.last_full_state_id, self.last_state_id, reg_patches, mem_patches)
 
         self.states_dict[new_state_id] = new_state
@@ -1037,7 +1009,11 @@ class EmuStateManager():
         tte_log_dbg(f"State Manager: Created LIGHT PATCH state: {new_state_id}, base:{new_state.base_full_state_id},  prev: {new_state.prev_state_id}")
 
 
-    def _create_heavy_patch_state(self, new_state_id: str, current_registers_map: Dict[str, int], current_memory_pages: Dict[int, Tuple[int,bytearray]]) -> None:
+    def _create_heavy_patch_state(self,
+                                  new_state_id: str,
+                                  instruction_address:int,
+                                  current_registers_map: Dict[str, int],
+                                  current_memory_pages: Dict[int, Tuple[int,bytearray]]) -> None:
         assert self.last_full_state_id is not None, "No full base state available for patch creation."
 
         base_full_state: Optional[FullEmuState] = self.get_state(self.last_full_state_id) # type: ignore
@@ -1047,18 +1023,18 @@ class EmuStateManager():
         reg_patches = catch_dict_diff(base_full_state.registers_map, current_registers_map)
         mem_patches,new_pages = catch_bytes_diff(base_full_state.memory_pages, current_memory_pages)
 
-        new_state = HeavyPatchEmuState(state_id=new_state_id)
+        new_state = HeavyPatchEmuState(new_state_id,
+                                       instruction_address,
+                                       self.instruction_execution_counts[instruction_address])
         new_state.set_data(self.last_full_state_id, reg_patches, mem_patches, new_pages)
 
         self.states_dict[new_state_id] = new_state
-
 
         self.patch_chain_count += 1
         self.heavy_patch_count += 1
         self.cumulative_diff_size += len(mem_patches)
         self.last_state_id = new_state_id # Update the last status id
         tte_log_dbg(f"State Manager: Created HEAVY PATCH state: {new_state_id}, base: {new_state.base_full_state_id}")
-
 
 
     def get_state(self, state_id: Optional[str]) -> Optional[EmuState]:
@@ -1071,7 +1047,8 @@ class EmuStateManager():
             return None
         return self.states_dict.get(state_id, None)
 
-    def determine_next_state_type(self):
+
+    def _determine_next_state_type(self):
         if self.last_full_state_id is None or self.heavy_patch_count > self.MAX_HEAVY_PATCH_COUNT:
             # If this is the first full state, always create a full state
             return EmuState.STATE_TYPE_FULL
@@ -1086,11 +1063,11 @@ class EmuStateManager():
         return EmuState.STATE_TYPE_LIGHT_PATCH
 
 
-
-
-
-
-    def create_state(self, uc, instruction_address: int, memory_regions: Iterator[Tuple[int, int, int]], mem_patches: List[Tuple[int, int, int]]) -> None:
+    def create_state(self,
+                     uc,
+                     instruction_address: int,
+                     memory_regions: Iterator[Tuple[int, int, int]],
+                     mem_patches: List[Tuple[int, int, int]]) -> None:
         """
         Create a new EmuState object based on the current state of the Unicorn instance.
         Decide whether to create a full state or a patch state based on the difference size or number of steps.
@@ -1112,20 +1089,29 @@ class EmuStateManager():
             for reg_name,reg_const in UNICORN_REGISTERS_MAP[self.arch].items()
         }
 
-        next_state_type = self.determine_next_state_type()
+        next_state_type = self._determine_next_state_type()
         if next_state_type == EmuState.STATE_TYPE_FULL:
             # Create a full status
             current_memory_pages = self._read_memory_pages(uc, memory_regions)
-            self._create_full_state(new_state_id, current_registers_map, current_memory_pages, mem_patches)
+            self._create_full_state(new_state_id,
+                                    instruction_address,
+                                    current_registers_map,
+                                    current_memory_pages)
 
         elif next_state_type == EmuState.STATE_TYPE_HEAVY_PATCH:
             # Create a heavy patch status
             current_memory_pages = self._read_memory_pages(uc, memory_regions)
-            self._create_heavy_patch_state(new_state_id, current_registers_map,  current_memory_pages)
+            self._create_heavy_patch_state(new_state_id,
+                                           instruction_address,
+                                           current_registers_map,
+                                           current_memory_pages)
 
         else:
             # Create a light patch status
-            self._create_ligth_patch_state(new_state_id, current_registers_map, mem_patches)
+            self._create_light_patch_state(new_state_id,
+                                           instruction_address,
+                                           current_registers_map,
+                                           mem_patches)
 
         # #TODO testing
         # if current_memory_pages == None: #   type: ignore
@@ -1159,6 +1145,8 @@ class EmuStateManager():
     #         print(st2.memory_pages) #   type: ignore
     #         print(st3.memory_pages)
     #         # print(self.get_state(st1.prev_state_id).generate_full_state(self.states_dict).__dict__)  #   type: ignore
+
+
 
 
 
