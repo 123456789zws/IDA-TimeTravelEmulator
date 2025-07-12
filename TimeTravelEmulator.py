@@ -16,11 +16,13 @@ from attr import dataclass
 
 
 import bsdiff4
+from sortedcontainers import SortedDict
 from unicorn import *
 from unicorn.x86_const import *
 from capstone import *
 
 
+state_montior = None
 
 
 VERSION = '0.0.1'
@@ -814,46 +816,52 @@ class LightPatchEmuState(EmuState):
 
         self.reg_patches = reg_patches
         self.mem_patches = mem_patches
+        tte_log_dbg(message=f"state:{self.state_id}, mem_patches {self.mem_patches}")
 
 
     def generate_full_state(self, states_dict: Dict[str, EmuState]) -> Optional[FullEmuState]:
+        tte_log_dbg(f"Generate full state for light path state {self.state_id}")
         target_state = FullEmuState(self.state_id, self.instruction_address, self.execution_count)
-
+        target_memory_patch = self.mem_patches.copy()
         assert self.base_full_state_id is not None, "Generate full State: Cannot generate full state: base state id not set."
         base_full_state: Optional[EmuState] = states_dict.get(self.base_full_state_id)
         assert base_full_state is not None, f"Generate full State: Cannot generate full state for {self.base_full_state_id}: base state not found."
         assert isinstance(base_full_state, FullEmuState), f"Generate full State: Cannot generate full state for {self.base_full_state_id}: base state is not a full state."
 
-        while self.prev_state_id is not None:
-            prev_state = states_dict.get(self.prev_state_id)
+        prev_full_state: Optional[EmuState] = None
+        prev_state_id = self.prev_state_id
+        while prev_state_id is not None:
+            prev_state = states_dict.get(prev_state_id)
             if prev_state is None:
-                tte_log_warn(f"Generate full State: Cannot generate full state for {self.prev_state_id}: previous state not found.")
+                tte_log_warn(f"Generate full State: Cannot generate full state for {prev_state_id}: previous state not found.")
                 return None
 
             if prev_state.type in [EmuState.STATE_TYPE_FULL, EmuState.STATE_TYPE_HEAVY_PATCH]:
-                prev_full_state: Optional[EmuState] = prev_state.generate_full_state(states_dict)
+                prev_full_state = prev_state.generate_full_state(states_dict)
                 assert prev_full_state is not None, "Generate full State: Cannot generate full state for previous state."
                 assert isinstance(prev_full_state, FullEmuState), "Generate full State: Previous state is not a full state."
                 break;
             elif prev_state.type == EmuState.STATE_TYPE_LIGHT_PATCH:
                 assert isinstance(prev_state, LightPatchEmuState), "Generate full State: Previous state is not a light patch state."
-                self.mem_patches.extend(prev_state.mem_patches)
-                self.prev_state_id = prev_state.prev_state_id
+                target_memory_patch.extend(prev_state.mem_patches)
+                prev_state_id = prev_state.prev_state_id
 
+        # Apply register patches
         target_state.registers_map = apply_dict_patch(base_full_state.registers_map, self.reg_patches)
-        target_state.memory_pages = prev_full_state.memory_pages.copy()
-        target_memory_pages = prev_full_state.memory_pages.copy()
-        while self.mem_patches:
-            addr, size, value = self.mem_patches.pop()
+
+        # Apply memory patches
+        assert prev_full_state is not None, "Generate full State: Cannot apply memory patch: previous state not found."
+        target_state.memory_pages = prev_full_state.memory_pages
+        while target_memory_patch:
+            addr, size, value = target_memory_patch.pop()
             value = value.to_bytes(size, byteorder='big' if get_is_be() else 'little')
 
             align_addr = addr & PAGE_MASK
             offset = addr & ~PAGE_MASK
 
-            assert align_addr in target_memory_pages, "Generate full State: Cannot apply memory patch: address not found in memory pages."
-            _, page_data = target_memory_pages[align_addr]
+            assert align_addr in target_state.memory_pages, "Generate full State: Cannot apply memory patch: address not found in memory pages."
+            _, page_data = target_state.memory_pages[align_addr]
             page_data[offset : offset + size] = value
-        target_state.memory_pages = target_memory_pages
         return target_state
 
 
@@ -884,10 +892,12 @@ class HeavyPatchEmuState(EmuState):
         self.new_pages = new_pages
 
     def generate_full_state(self, states_dict: Dict[str, EmuState]) -> Optional[FullEmuState]:
+        tte_log_dbg(f"Generate full state for heavy path state {self.state_id}")
         target_state = FullEmuState(self.state_id, self.instruction_address, self.execution_count)
 
         assert self.base_full_state_id is not None, "Generate full State: Cannot apply memory patch: base state id not set."
-        base_full_state: Optional[EmuState] = states_dict.get(self.base_full_state_id)
+        assert self.base_full_state_id in states_dict, f"Generate full State: Cannot apply memory patch: base state {self.base_full_state_id} not found."
+        base_full_state: Optional[EmuState] = states_dict[self.base_full_state_id].generate_full_state(states_dict)
 
         assert base_full_state is not None, f"Generate full State: Cannot get full state for {self.base_full_state_id}: base state not found."
         assert isinstance(base_full_state, FullEmuState), f"Generate full State: Cannot apply memory patch: base state is not a full state."
@@ -896,7 +906,7 @@ class HeavyPatchEmuState(EmuState):
         target_memory_pages = apply_bytes_patch(base_full_state.memory_pages, self.mem_bsdiff_patches, self.new_pages)
         target_state.set_data(target_registers_map, target_memory_pages)
 
-        return target_state
+        return deepcopy(target_state)
 
 
 
@@ -1146,8 +1156,77 @@ class EmuStateManager():
     #         print(st3.memory_pages)
     #         # print(self.get_state(st1.prev_state_id).generate_full_state(self.states_dict).__dict__)  #   type: ignore
 
+    def compare_states(self, state1_id: str, state2_id: str):
+        """
+        Compares any two EmuState objects (full or patch) and returns their differences.
+
+        :param EmuStateManager: An instance of EmuStateManager to extract full states if needed.
+        :param state1: The first EmuState object.
+        :param state2: The second EmuState object.
+        :return: A tuple (regs_diff, mem_diff, pages_diff) representing the differences.
+                 regs_diff: Dict of changed registers in state2 relative to state1.
+                 mem_diff: List of memory different from state1 to state2.
+                 pages_diff: List of page different from state1 to state2.
+        """
+        tte_log_dbg(f"\n--- Comparing states: {state1_id} vs {state2_id} ---")
+
+        state1 = self.get_state(state1_id)
+        state2 = self.get_state(state2_id)
+
+        assert state1, "State 1 not found: {}".format(state1_id)
+        assert state2, "State 2 not found: {}".format(state2_id)
+
+        full_state1 = state1.generate_full_state(self.states_dict)
+        full_state2 = state2.generate_full_state(self.states_dict)
 
 
+        if not full_state1:
+            tte_log_warn(f"Could not generate full state for '{state1_id}'. Comparison aborted.")
+            return
+        if not full_state2:
+            tte_log_warn(f"Could not generate full state for '{state2_id}'. Comparison aborted.")
+            return
+
+        tte_log_dbg(f"Comparison between State '{state1_id}' (Type: {state1.type}) and State '{state2_id}' (Type: {state2.type}):")
+        tte_log_dbg(f"Instruction Address: 0x{full_state1.instruction_address:X} -> 0x{full_state2.instruction_address:X}")
+        tte_log_dbg(f"Execution Count: {full_state1.execution_count} -> {full_state2.execution_count}")
+
+        regs_diff = catch_dict_diff(full_state1.registers_map, full_state2.registers_map)
+
+        if not regs_diff:
+            print("No register differences found.")
+        else:
+            for reg_name, new_val in regs_diff.items():
+                old_val = full_state1.registers_map.get(reg_name, "N/A")
+                print(f"  {reg_name}: 0x{old_val:X} -> 0x{new_val:X}")
+
+        mem_diff = SortedDict()
+        def catch_mem_diff(page_start_addr, bytes1: bytearray, bytes2: bytearray):
+            assert len(bytes1) == len(bytes2), "Byte arrays must be of equal length."
+            for offset_addr, (b1, b2) in enumerate(zip(bytes1, bytes2)):
+                if b1 != b2:
+                    tte_log_dbg(f"Memory difference found at 0x{page_start_addr + offset_addr:X}: 0x{b1:X} -> 0x{b2:X}")
+                    mem_diff[page_start_addr + offset_addr] = [b1, b2]
+
+        for page_start_addr in full_state1.memory_pages.keys() & full_state2.memory_pages.keys():
+
+            catch_mem_diff(
+                page_start_addr,
+                full_state1.memory_pages[page_start_addr][1],
+                full_state2.memory_pages[page_start_addr][1]
+            )
+
+        pages_diff = SortedDict()
+
+        diff_keys_in_state1 = set(full_state1.memory_pages.keys()) - set(full_state2.memory_pages.keys())
+        diff_keys_in_state2 = set(full_state2.memory_pages.keys()) - set(full_state1.memory_pages.keys())
+
+        for key in diff_keys_in_state1:
+            pages_diff[key] = (1, full_state1.memory_pages[key])
+        for key in diff_keys_in_state2:
+            pages_diff[key] = (2, full_state2.memory_pages[key])
+
+        return regs_diff, mem_diff, pages_diff
 
 
 
@@ -1227,7 +1306,7 @@ class EmuTracer():
                                         self.state_buffer.mem_patches)
 
         # Save the current state to the state buffer
-        self.state_buffer.mem_patches.clear()
+        self.state_buffer.mem_patches = []
 
         return True
 
@@ -1315,6 +1394,12 @@ if __name__ == "__main__":
     et = EmuTracer(ee,esm) # type: ignore
 
     ee.run()
+
+    esm.compare_states("$0x140001464#1","$0x14000146B#1")
+
+    # st = esm.get_state("$0x14000146B#1")
+    # t = st.generate_full_state(esm.states_dict)
+    # print(t.memory_pages)
 
     # print(esm.generate_full_state("$0x140001458#1").__dict__)
 
