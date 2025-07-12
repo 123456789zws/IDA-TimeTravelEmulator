@@ -846,10 +846,10 @@ class LightPatchEmuState(EmuState):
         self.prev_state_id: Optional[str] = None
 
         self.reg_patches: Dict[str, int] = {} # {reg_name: patch_value}
-        self.mem_patches: List[Tuple[int, int, int]] = [] # List[[address, size, value]...]
+        self.mem_patches: List[Tuple[int, int, bytes]] = [] # List[[address, size, value]...]
 
 
-    def set_data(self, base_full_state_id: str, prev_state_id: str, reg_patches: Dict[str, int], mem_patches: List[Tuple[int, int, int]]):
+    def set_data(self, base_full_state_id: str, prev_state_id: str, reg_patches: Dict[str, int], mem_patches: List[Tuple[int, int, bytes]]):
         """
         Set the patch state of the emulator.
         :param reg_patches: Dictionary of register patches.
@@ -898,7 +898,6 @@ class LightPatchEmuState(EmuState):
         target_state.memory_pages = prev_full_state.memory_pages
         while target_memory_patch:
             addr, size, value = target_memory_patch.pop()
-            value = value.to_bytes(size, byteorder='big' if get_is_be() else 'little')
 
             align_addr = addr & PAGE_MASK
             offset = addr & ~PAGE_MASK
@@ -995,7 +994,7 @@ class EmuStateManager():
                                   new_state_id: str,
                                   instruction_address:int,
                                   current_registers_map: Dict[str, int],
-                                  mem_patches: List[Tuple[int, int, int]]) -> None:
+                                  mem_patches: List[Tuple[int, int, bytes]]) -> None:
         assert self.last_full_state_id is not None, "No full base state available for patch creation."
         assert self.last_state_id is not None, "No previous state available for patch creation."
 
@@ -1076,7 +1075,7 @@ class EmuStateManager():
                      uc,
                      instruction_address: int,
                      memory_regions: Iterator[Tuple[int, int, int]],
-                     mem_patches: List[Tuple[int, int, int]]) -> None:
+                     mem_patches: List[Tuple[int, int, bytes]]) -> None:
         """
         Create a new EmuState object based on the current state of the Unicorn instance.
         Decide whether to create a full state or a patch state based on the difference size or number of steps.
@@ -1236,7 +1235,7 @@ class EmuTracer():
     """
     @dataclass
     class state_buffer_t(object):
-        mem_patches: List[Tuple[int, int, int]]
+        mem_patches: List[Tuple[int, int, bytes]]
 
     def __init__(self, executer:EmuExecuter, state_manager:EmuStateManager) -> None:
         self.executer: EmuExecuter = executer
@@ -1315,9 +1314,9 @@ class EmuTracer():
         @Callback function for hook "UC_HOOK_MEM_WRITE"
 
         """
-
+        value_bytes = value.to_bytes(size, byteorder='big' if get_is_be() else 'little')
         # Save the memory patch to the state buffer
-        self.state_buffer.mem_patches.append((address, size, value))
+        self.state_buffer.mem_patches.append((address, size, value_bytes))
         return True
 
 
