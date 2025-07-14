@@ -22,6 +22,18 @@ from unicorn.x86_const import *
 from capstone import *
 from PyQt5 import QtGui, QtCore, QtWidgets
 
+PAGE_SIZE = 0x1000
+
+
+
+
+
+
+
+
+
+
+
 
 
 # Line types
@@ -48,6 +60,8 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
     def __init__(self):
         super().__init__()
         self._lines_data: SortedList = SortedList(key=lambda x: (x.address, x.address_idx)) # SortedList[line_info], using Tuple[address, address_idx] as key
+        self._lines_data_buffer: List[address_line_info] = []
+
         self.need_rebuild = False # Flag to indicate if the viewer needs to be refreshed
 
 
@@ -90,6 +104,9 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         Notes: It is a performance-consuming function, so call this function as few as possible
         """
         super().ClearLines() # Call base ClearLines
+        if self._lines_data_buffer:
+            self._lines_data.update(self._lines_data_buffer)
+            self._lines_data_buffer.clear()
         for addr_info in self._lines_data:
             super().AddLine(addr_info.value, addr_info.fgcolor, addr_info.bgcolor) # Call base AddLine
         super().Refresh() # Refresh the viewer
@@ -123,11 +140,61 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
 
     def AddLine(self, address, address_type, line, fgcolor=None, bgcolor=None, lazy = False):
         """
-        Adds a colored line associated with a binary address.
+        Adds a colored line associated with a binary address to  the last line of viewer.
+        Note: The incoming address parameter must be bigger than all existing addresses in the viewer
 
         :param lazy: If True, the viewer will not be refreshed after the deletion.
         :return: Boolean indicating success.
         """
+
+        is_appending = True
+        addr_idx = 0
+
+        if self._lines_data:
+            last_line_info: address_line_info = self._lines_data[-1] # type: ignore
+            if address < last_line_info.address:
+                # The address is out of order and cannot be added directly. Forced to go to lazy mode
+                is_appending = False
+                print(
+                    f"AddLine: Incoming address {hex(address)} is out of order "
+                    f"(less than last address {hex(last_line_info.address)}). "
+                    f"Forcing lazy rebuild for correct sorting."
+                )
+                idx = self._get_lineno_right_from_address(address)
+                addr_idx = self._lines_data[idx].address_idx + 1 # type: ignore
+                lazy = True
+
+            elif address == last_line_info.address:
+                # The address is the same, increment the address_idx
+                addr_idx = last_line_info.address_idx + 1
+
+            else: # address > last_line_info.address
+                #Strictly append, new address, address_idx starts from 0
+                addr_idx = 0
+        else:
+            # The view is empty, the first element
+            addr_idx = 0
+
+        # Add the new or updated entry. SortedList.add() will place it correctly.
+        new_line_info = address_line_info(address, addr_idx,address_type, line, fgcolor, bgcolor)
+        if lazy:
+            self.need_rebuild = True
+            self._lines_data_buffer.append(new_line_info)
+            return True
+        else:
+            self._lines_data.add(new_line_info)
+            return super().AddLine(line, fgcolor, bgcolor) # Call base InsertLine
+
+
+
+    def InsertLine(self, address, address_type, line, fgcolor=None, bgcolor=None):
+        """
+        Inserts a line at the position determined by the given address.
+        This is equivalent to AddLine as lines are always kept sorted by address.
+
+        :return: Boolean indicating success.
+        """
+        self.CheckRebuild()
         # Find if the address already exists
         idx = self._get_lineno_right_from_address(address)
         addr_idx = 0
@@ -138,21 +205,13 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         # Add the new or updated entry. SortedList.add() will place it correctly.
         new_line_info = address_line_info(address, addr_idx,address_type, line, fgcolor, bgcolor)
         self._lines_data.add(new_line_info)
-        if lazy:
-            self.need_rebuild = True
-            return True
+
+        actual_lineno_inserted = self._lines_data.index(new_line_info)
+        if actual_lineno_inserted == len(self._lines_data) - 1:
+            return super().AddLine(line, fgcolor, bgcolor) # Call base InsertLine
         else:
-            actual_lineno_inserted = self._lines_data.index(new_line_info)
-            super().InsertLine(actual_lineno_inserted, line, fgcolor, bgcolor) # Call base InsertLine
+            return super().InsertLine(actual_lineno_inserted, line, fgcolor, bgcolor) # Call base InsertLine
 
-    def InsertLine(self, address, address_type, line, fgcolor=None, bgcolor=None):
-        """
-        Inserts a line at the position determined by the given address.
-        This is equivalent to AddLine as lines are always kept sorted by address.
-
-        :return: Boolean indicating success.
-        """
-        return self.AddLine(address, address_type, line, fgcolor, bgcolor)
 
     def EditLine(self, address, address_idx, address_type, line, fgcolor=None, bgcolor=None):
         """
@@ -300,17 +359,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 return info.address
         return None
 
-aacv = AddressAwareCustomViewer()
-aacv.Create("AAA")
-
-
-for addr in range(0x1000, 0x1010):
-    aacv.AddLine(addr, 0, f"{addr}: Hello, world!")
-    aacv.AddLine(addr, 0, f"{addr}: Hello, world!")
-aacv.Show()
-
-print(aacv._lines_data)
-
 
 
 
@@ -324,22 +372,34 @@ class TTE_DisassemblyViewer(ida_kernwin.PluginForm):
         self.viewer = AddressAwareCustomViewer()
 
 
-    def Init(self, memory_pages: Dict[int, Tuple[int, bytearray]]):
-        self.title = "TimeTravelEmuDisassembly"
+    def LoadMemoryPage(self, memory_pages: Dict[int, Tuple[int, bytearray]]):
+        viewer_title = "TimeTravelEmuDisassembly"
         self.icon = ":/icons/timetravel_icon.png"
+
+        # self.viewer.Create(viewer_title)
 
         memory_pages_list = sorted(memory_pages.items())
         for start_addr, (perm, data) in memory_pages_list:
             assert len(data) == PAGE_SIZE
-            end_addr = start_addr + PAGE_SIZE
+            for offset in range(PAGE_SIZE):
+                self.viewer.AddLine(start_addr + offset,
+                                    DATA_LINE,
+                                    f"{start_addr + offset:X}: {data[offset]}",
+                                    None,
+                                    None,
+                                    True)
+
+        self.viewer.Refresh()
 
 
 
-    def _insert_memory_page(self, start_addr: int, end_addr: int, data: bytearray):
-        for address in range(start_addr, end_addr, 16):
-            addr_name = idc.get_name(address)
-            if addr_name:
-                self.viewer.CustomAddLine()
+
+
+    # def _insert_memory_page(self, start_addr: int, end_addr: int, data: bytearray):
+    #     for address in range(start_addr, end_addr, 16):
+    #         addr_name = idc.get_name(address)
+    #         if addr_name:
+    #             self.viewer.AddLine(address, NAME_LINE, f"{addr_name}")
 
 
 
@@ -395,12 +455,6 @@ class TTE_DisassemblyViewer(ida_kernwin.PluginForm):
 
 
 
-
-
-
-
-# w = TTE_DisassemblyViewer()
-# w.Show("TEST IDA")
 
 
 

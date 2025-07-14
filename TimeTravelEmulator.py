@@ -1343,7 +1343,7 @@ class EmuTracer():
     def cb_create_emu_end_state(self, uc):
         insn_pointer = uc.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch])
         self.state_manager.create_state(uc,
-                                        self.state_buffer.instruction,
+                                        "",
                                         insn_pointer,
                                         self.executer.get_mem_regions(),
                                         self.state_buffer.mem_patches)
@@ -1395,42 +1395,6 @@ class EmuViewer(ida_kernwin.simplecustviewer_t):
 import cProfile
 import pstats
 
-
-
-
-if __name__ == "__main__":
-    t = 0x140001450
-    start = idc.get_func_attr(t,0)
-    end = idc.get_fchunk_attr(t,8)
-    F = EmuSettingsForm(start,end)
-    F.Execute()
-
-    ee = EmuExecuter(F.GetSetting()) # type: ignore
-    ee.init()
-
-    esm = EmuStateManager()
-
-    et = EmuTracer(ee,esm) # type: ignore
-
-    ee.run()
-
-    esm.compare_states("$0x140001464#1","$0x14000146B#1")
-
-    # st = esm.get_state("$0x14000146B#1")
-    # t = st.generate_full_state(esm.states_dict)
-    # print(t.memory_pages)
-
-    # print(esm.generate_full_state("$0x140001458#1").__dict__)
-
-
-    # esm2 = EmuStateManager()
-    # esm2.create_state(ee.mu, ee.mu.reg_read(ee.insn_pointer), ee.get_mem_regions(), et.state_buffer.mem_patches)
-
-
-    # print(esm2.get_state("$0x140001458#1").__dict__)
-    print(esm.get_state_list_with_insn())
-    ee.destroy()
-    F.Free()
 
 
 
