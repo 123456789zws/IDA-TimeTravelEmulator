@@ -383,7 +383,6 @@ class TTE_DisassemblyViewer():
 
 
     def __init__(self):
-        super(TTE_DisassemblyViewer, self).__init__()
         self.viewer = AddressAwareCustomViewer()
         self.bitness = get_bitness()
         if self.bitness:
@@ -452,20 +451,59 @@ class TTE_DisassemblyViewer():
 
 
 
-class TTE_MemoryViewer:
-    pass
-
-
-
 class TTE_RegistersViewer:
-    pass
+    def __init__(self):
+        self.viewer = ida_kernwin.simplecustviewer_t()
+        self.bitness = get_bitness()
+        if self.bitness:
+            self.hex_len = self.bitness // 4
+        else:
+            tte_log_err("Failed to get bitness")
+
+
+    def InitViewer(self):
+        self.viewer.Create("TimeTravelEmuRegisters")
+        self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
+        self._SetCustomViewerStatusBar()
+
+
+    def _SetCustomViewerStatusBar(self):
+        # Remove original status bar
+        viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
+        for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
+            viewer_status_bar.removeWidget(widget)
+        viewer_status_bar.hide()
+
+
+    def LoadRegisters(self, registers: Dict[str, int], regs_diff: Optional[Dict[str, int]]):
+        changed_fgcolor = 0x00FF00 # Green
+
+        for reg_name in registers:
+            reg_value = registers[reg_name]
+            formatted_value = f"0x{reg_value:0{self.hex_len}X}"
+
+            line_fgcolor = None
+
+            if regs_diff is not None and \
+                reg_name in regs_diff and \
+                regs_diff[reg_name] != reg_value:
+                line_fgcolor = changed_fgcolor
+
+            line_text = f"  {reg_name:>6}: {formatted_value}"
+            self.viewer.AddLine(line_text, fgcolor=line_fgcolor)
+
+        self.viewer.Refresh()
 
 
 
-class TTE_StatesViewer:
-    pass
+class TTE_MemoryViewer:
+    def __init__(self):
+        self.viewer = ida_kernwin.simplecustviewer_t()
 
 
+    def InitViewer(self):
+        self.viewer.Create("TimeTravelEmuRegisters")
+        self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
 
 
 
@@ -498,17 +536,14 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         super().__init__()
 
         self.disassembly_viewer: TTE_DisassemblyViewer =  TTE_DisassemblyViewer()
-        self.memory_viewer: TTE_MemoryViewer = TTE_MemoryViewer()
         self.registers_viewer: TTE_RegistersViewer = TTE_RegistersViewer()
-        self.states_viewer: TTE_StatesViewer = TTE_StatesViewer()
+        self.mempages_viewer: TTE_MemoryViewer = TTE_MemoryViewer()
 
 
     def Init(self):
-        """
-
-        """
         self.disassembly_viewer.InitViewer()
-
+        self.registers_viewer.InitViewer()
+        self.mempages_viewer.InitViewer()
 
 
     def OnCreate(self, form):
@@ -534,17 +569,28 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         memory_pages = last_full_state.memory_pages
         execution_counts =  {item[1]: item[3] for item in state_manager.get_state_list_with_insn()}
         self.disassembly_viewer.LoadMemoryPages(-1, -1, memory_pages ,execution_counts)
+        self.registers_viewer.LoadRegisters(last_full_state.registers_map, None)
 
 
     def PopulateForm(self):
-        vbox = QtWidgets.QVBoxLayout()
-        vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.addWidget(self.disassembly_viewer.viewer_widegt)
-
-        self.parent.setLayout(vbox)
+        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal) # type: ignore
+        main_splitter.setChildrenCollapsible(True)
 
 
+        main_splitter.addWidget(self.disassembly_viewer.viewer_widegt)
 
+
+        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical) # type: ignore
+        right_splitter.setChildrenCollapsible(True)
+
+        right_splitter.addWidget(self.registers_viewer.viewer_widegt)
+        right_splitter.addWidget(self.mempages_viewer.viewer_widegt)
+
+        main_splitter.addWidget(right_splitter)
+
+        main_layout = QtWidgets.QVBoxLayout(self.parent)
+        main_layout.addWidget(main_splitter)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
 
 
