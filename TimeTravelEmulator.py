@@ -1,3 +1,4 @@
+import re
 from unittest import result
 import idaapi
 import ida_ida
@@ -10,7 +11,7 @@ import ida_segment
 
 from abc import ABC
 from collections import defaultdict
-from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
 from copy import deepcopy
 from attr import dataclass
 
@@ -36,7 +37,7 @@ PAGE_SIZE = 0x1000
 PAGE_MASK = ~(PAGE_SIZE - 1)
 
 # Define default page permission
-DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
+DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ | UC_PROT_EXEC
 
 
 
@@ -162,34 +163,27 @@ def get_arch() -> str:
     return IDA_PROC_TO_ARCH_MAP[(proc_name, proc_bitness)]
 
 
-def get_slice_segment(page_size: int) -> "defaultdict[int, List[Tuple[int, int]]]":
+def get_page_slice(page_start: int, page_size: int) -> List[Tuple[int, int]]:
     """
-    Slice the segment into pages of the given size.
+    Get a slice of segments address of a memory page
 
-    :param segment_dict: A list of segment_t objects.
-    :param page_size: The size of each page.
-    :return: A dictionary, where the key is the start address of the page,
-     and the value is a list of tuples (start_ea, end_ea) of the segments in the page.
+    :param page_start: Start address of the memory page. Must be page aligned.
+    :param page_size: Size of the memory page
+    :return: A list, where the value is a list of tuples (start_ea, end_ea) of the segments slice in the page.
     """
-    result = defaultdict(list)
-    segment_list = [ida_segment.getnseg(n) for n in range(ida_segment.get_segm_qty())]
-    for seg in segment_list:
-        start = seg.start_ea
-        end = seg.end_ea
-
-        current_addr = start
-        while current_addr < end:
-            page_start = (current_addr // page_size) * page_size
-            page_end = page_start + page_size
-
-            seg_in_page_start = max(current_addr, page_start)
-            seg_in_page_end = min(end, page_end)
-
-            if seg_in_page_start < seg_in_page_end:
-                result[page_start].append((seg_in_page_start, seg_in_page_end))
-            current_addr = page_end
+    result: List[Tuple[int, int]] = []
+    seg = ida_segment.get_first_seg()
+    while seg:
+        # Check for overlap:
+        # (seg.start_ea <= end_address) and (seg.end_ea >= start_address)
+        if seg.start_ea < page_start + page_size - 1 and seg.end_ea > page_start:
+            max_addr = max(seg.start_ea, page_start)
+            min_addr = min(seg.end_ea, page_start + page_size - 1)
+            result.append((max_addr, min_addr))
+        seg = ida_segment.get_next_seg(seg.end_ea -1 ) # -1 to ensure next segment is properly found
 
     return result
+
 
 def get_segment_prem(addr: int) -> int:
     seg = ida_segment.getseg(addr)
@@ -407,7 +401,7 @@ def tte_log_err(message):
 
 @dataclass
 class EmuSettings():
-    start = 0x140001450#start#
+    start = 0x7FF745371450#start#
     end = -1#0x14000201C#end#
     # emulate_step_limit = 10
     is_load_registers = False
@@ -552,7 +546,7 @@ class EmuExecuter():
         self.settings = settings
         tte_log_info("Create EmuExecuter: arch-{}, mode-{}".format(self.unicorn_arch, self.unicorn_mode))
 
-        self.unloaded_binary_page = {}
+        self.loaded_pages: Set[int] = set() # Set(page_start)
 
         self.emu_map_mem_callback = []
         self.emu_run_end_callback = []
@@ -567,7 +561,6 @@ class EmuExecuter():
         if(self.settings.is_log):
             TTE_Logger().start(LOG_FLIE_PATH, self.settings.log_level) #TODO: allow user to select log file path and log level and remove it
 
-        self.unloaded_binary_page = get_slice_segment(PAGE_SIZE) # dict(page_start: [(seg_start, seg_end),...],...)
 
         # Unicorn instance creation
         self.mu = unicorn.Uc(self.unicorn_arch, self.unicorn_mode)
@@ -584,14 +577,15 @@ class EmuExecuter():
         self._is_initialized = True
 
     def _is_memory_mapped(self, address) -> bool:
-        return any(map_start <= address < map_end for map_start, map_end, _ in self.mu.mem_regions())
+        # return any(map_start <= address < map_end for map_start, map_end, _ in self.mu.mem_regions())
+        return (address & PAGE_MASK) in self.loaded_pages
 
 
     def _map_memory(self, map_start, map_size) -> None:
         """
         Map memory pages for the given range.
 
-        :param map_start: Start address of the mapping.Must be page aligned.
+        :param map_start: Start address of the mapping. Must be page aligned.
         :param map_size: Size of the mapping. Must be page aligned.
         """
 
@@ -636,15 +630,12 @@ class EmuExecuter():
         if not is_address_range_loaded(start_ea, end_ea):
             return
 
-        segments_to_load: List[List[Tuple[int, int]]] = []
-        for page_start_addr in self.unloaded_binary_page.copy().keys():
-            if page_start_addr >= map_start and page_start_addr < map_start + map_size:
-                segments_to_load.append(self.unloaded_binary_page.pop(page_start_addr))
-
-        for load_range_list in segments_to_load:
-            for start_ea, end_ea in load_range_list:
-                self._load_binary(start_ea, end_ea )
-                tte_log_info(f"Load binary segments {ida_segment.get_segm_name(idaapi.getseg(start_ea))}: 0x{start_ea:X}~0x{end_ea:X}")
+        for page_start in range(map_start, map_start + map_size, PAGE_SIZE):
+            if page_start not in self.loaded_pages:
+                load_range_list = get_page_slice(page_start, PAGE_SIZE)
+                for start_ea, end_ea in load_range_list:
+                    self._load_binary(start_ea, end_ea )
+                    tte_log_info(f"Load binary segments {ida_segment.get_segm_name(idaapi.getseg(start_ea))}: 0x{start_ea:X}~0x{end_ea:X}")
 
 
     def _hook_mem_unmapped(self) -> None:
@@ -663,7 +654,7 @@ class EmuExecuter():
 
                 return True
             except UcError as e:
-                tte_log_info(f"Hook callback: Mapping memory failed: {e}")
+                tte_log_err(f"Hook callback: Mapping memory failed: {e}")
                 return False
 
 
@@ -733,7 +724,8 @@ class EmuExecuter():
 
         self.mu.emu_stop()
         self.emu_run_end_callback.clear()
-        self.unloaded_binary_page.clear()
+        self.emu_map_mem_callback.clear()
+        self.loaded_pages.clear()
 
         TTE_Logger().stop()
         self._is_initialized = False
