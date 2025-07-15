@@ -34,7 +34,7 @@ PAGE_SIZE = 0x1000
 
 
 
-
+CHAMGE_HIGHLIGHT_COLOR   = 0xFFD073
 
 
 
@@ -484,35 +484,41 @@ class TTE_RegistersViewer:
     def InitViewer(self):
         self.viewer.Create("TimeTravelEmuRegisters")
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
-        self._SetCustomViewerStatusBar()
+        self.statusbar_label = QtWidgets.QLabel("State ID: N\\A")
 
+        self._SetCustomViewerStatusBar()
 
     def _SetCustomViewerStatusBar(self):
         # Remove original status bar
         viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
         for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
             viewer_status_bar.removeWidget(widget)
-        viewer_status_bar.hide()
+
+        viewer_status_bar.addWidget(self.statusbar_label)
 
 
-    def LoadRegisters(self, registers: Dict[str, int], regs_diff: Optional[Dict[str, int]]):
-        changed_fgcolor = 0x00FF00 # Green
+    def _RefreshStatusBar(self, state_id: str):
+        self.statusbar_label.setText(f"State ID: {state_id}")
 
+
+
+
+
+    def LoadRegisters(self, state_id: str, registers: Dict[str, int], regs_diff: Optional[List[str]]):
+        changed_fgcolor = CHAMGE_HIGHLIGHT_COLOR
         for reg_name, reg_value in registers.items():
 
-            line_fgcolor = None
+            line_bgcolor = None
 
-            if regs_diff is not None and \
-                reg_name in regs_diff and \
-                regs_diff[reg_name] != reg_value:
-                line_fgcolor = changed_fgcolor
+            if regs_diff is not None and reg_name in regs_diff:
+                line_bgcolor = changed_fgcolor
 
             line_text = ColorfulLineGenerator.generate_register_line(reg_name, reg_value, self.hex_len)
-            self.viewer.AddLine(line_text, fgcolor=line_fgcolor)
+            self.viewer.AddLine(line_text, bgcolor=line_bgcolor)
 
         self.viewer.Refresh()
 
-
+        self._RefreshStatusBar(state_id)
 
 
 
@@ -598,10 +604,18 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.disassembly_viewer.LoadMemoryPages(-1, -1, memory_pages ,execution_counts)
 
         regs_diff = None
+        mem_diff = None
+        entry= state_manager.get_state_change(last_full_state.state_id)
+
+        if entry:
+            regs_diff, mem_diff = entry
+            regs_diff = list(regs_diff)
+
+            print(regs_diff)
+            print(mem_diff)
 
 
-
-        self.registers_viewer.LoadRegisters(last_full_state.registers_map, regs_diff)
+        self.registers_viewer.LoadRegisters(last_full_state.state_id, last_full_state.registers_map, regs_diff)
 
 
     def PopulateForm(self):
