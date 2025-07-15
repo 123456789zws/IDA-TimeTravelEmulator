@@ -753,8 +753,9 @@ class EmuState(ABC):
     STATE_TYPE_LIGHT_PATCH = 2 # Light Patch Status
     STATE_TYPE_HEAVY_PATCH = 3 # Heavy Patch Status
 
-    def __init__(self, state_id: str, instruction: str = "", instruction_address: int = -1, execution_count: int = -1) -> None:
+    def __init__(self, state_id: str, prev_state_id: str = "", instruction: str = "",  instruction_address: int = -1, execution_count: int = -1) -> None:
         self.state_id = state_id
+        self.prev_state_id = prev_state_id
         self.type = None
 
         self.instruction_address = instruction_address
@@ -766,8 +767,8 @@ class EmuState(ABC):
 
 
 class FullEmuState(EmuState):
-    def __init__(self, state_id: str, instruction: str = "",instruction_address: int = -1,  execution_count: int = -1) -> None:
-        super().__init__(state_id, instruction,instruction_address,  execution_count)
+    def __init__(self, state_id: str, prev_state_id: str = "", instruction: str = "",instruction_address: int = -1,  execution_count: int = -1) -> None:
+        super().__init__(state_id, prev_state_id, instruction,instruction_address,  execution_count)
         self.type = EmuState.STATE_TYPE_FULL
 
         self.registers_map: Dict[str, int] = {} # {reg_name: reg_value}
@@ -788,8 +789,8 @@ class FullEmuState(EmuState):
 
 
 class HeavyPatchEmuState(EmuState):
-    def __init__(self, state_id: str, instruction: str = "", instruction_address: int = -1, execution_count: int = -1) -> None:
-        super().__init__(state_id, instruction,instruction_address,  execution_count)
+    def __init__(self, state_id: str, prev_state_id: str = "", instruction: str = "", instruction_address: int = -1, execution_count: int = -1) -> None:
+        super().__init__(state_id, prev_state_id, instruction, instruction_address, execution_count)
         self.type = EmuState.STATE_TYPE_HEAVY_PATCH
 
         self.base_full_state_id: Optional[str] = None
@@ -815,7 +816,7 @@ class HeavyPatchEmuState(EmuState):
 
     def generate_full_state(self, states_dict: Dict[str, EmuState]) -> Optional[FullEmuState]:
         tte_log_dbg(f"Generate full state for heavy path state {self.state_id}")
-        target_state = FullEmuState(self.state_id, self.instruction, self.instruction_address, self.execution_count)
+        target_state = FullEmuState(self.state_id, self.prev_state_id,self.instruction, self.instruction_address, self.execution_count)
 
         assert self.base_full_state_id is not None, "Generate full State: Cannot apply memory patch: base state id not set."
         assert self.base_full_state_id in states_dict, f"Generate full State: Cannot apply memory patch: base state {self.base_full_state_id} not found."
@@ -832,25 +833,24 @@ class HeavyPatchEmuState(EmuState):
 
 
 class LightPatchEmuState(EmuState):
-    def __init__(self, state_id: str, instruction: str = "", instruction_address: int = -1, execution_count: int = -1) -> None:
-        super().__init__(state_id, instruction, instruction_address, execution_count)
+    def __init__(self, state_id: str, prev_state_id: str = "", instruction: str = "", instruction_address: int = -1, execution_count: int = -1) -> None:
+        super().__init__(state_id, prev_state_id, instruction, instruction_address, execution_count)
         self.type = EmuState.STATE_TYPE_LIGHT_PATCH
 
         self.base_full_state_id: Optional[str] = None
-        self.prev_state_id: Optional[str] = None
+        self.prev_state_id: str = ""
 
         self.reg_patches: Dict[str, int] = {} # {reg_name: patch_value}
         self.mem_patches: List[Tuple[int, int, bytes]] = [] # List[[address, size, value]...]
 
 
-    def set_data(self, base_full_state_id: str, prev_state_id: str, reg_patches: Dict[str, int], mem_patches: List[Tuple[int, int, bytes]]):
+    def set_data(self, base_full_state_id: str, reg_patches: Dict[str, int], mem_patches: List[Tuple[int, int, bytes]]):
         """
         Set the patch state of the emulator.
         :param reg_patches: Dictionary of register patches.
         :param mem_patches: Dictionary of memory patches.
         """
         self.base_full_state_id = base_full_state_id
-        self.prev_state_id = prev_state_id
 
         self.reg_patches = reg_patches
         self.mem_patches = mem_patches
@@ -859,7 +859,7 @@ class LightPatchEmuState(EmuState):
 
     def generate_full_state(self, states_dict: Dict[str, EmuState]) -> Optional[FullEmuState]:
         tte_log_dbg(f"Generate full state for light path state {self.state_id}")
-        target_state = FullEmuState(self.state_id, self.instruction, self.instruction_address, self.execution_count)
+        target_state = FullEmuState(self.state_id, self.prev_state_id, self.instruction, self.instruction_address, self.execution_count)
         target_memory_patch = self.mem_patches.copy()
         assert self.base_full_state_id is not None, "Generate full State: Cannot generate full state: base state id not set."
         base_full_state: Optional[EmuState] = states_dict.get(self.base_full_state_id)
@@ -921,7 +921,7 @@ class EmuStateManager():
         # os.makedirs(self.storage_path, exist_ok=True)
 
         self.instruction_execution_counts: Dict[int, int] = defaultdict(int) # {address: count}
-        self.last_state_id: Optional[str] = None # Record the status id of the previous created
+        self.last_state_id: str = "" # Record the status id of the previous created
         self.last_full_state_id: Optional[str] = None # Record the most recent full status id
 
         self.patch_chain_count: int = 0 # Number of statuses in the current patch chain
@@ -972,6 +972,7 @@ class EmuStateManager():
                            current_registers_map: Dict[str, int],
                            current_memory_pages: Dict[int, Tuple[int, bytearray]]) -> None:
         new_state = FullEmuState(new_state_id,
+                                 self.last_state_id,
                                  instruction,
                                  instruction_address,
                                  self.instruction_execution_counts[instruction_address])
@@ -1002,10 +1003,11 @@ class EmuStateManager():
         reg_patches = catch_dict_diff(base_full_state.registers_map, current_registers_map)
 
         new_state = LightPatchEmuState(new_state_id,
+                                       self.last_state_id,
                                        instruction,
                                        instruction_address,
                                        self.instruction_execution_counts[instruction_address])
-        new_state.set_data(self.last_full_state_id, self.last_state_id, reg_patches, mem_patches)
+        new_state.set_data(self.last_full_state_id, reg_patches, mem_patches)
 
         self.states_dict[new_state_id] = new_state
 
@@ -1031,6 +1033,7 @@ class EmuStateManager():
         mem_patches,new_pages = catch_bytes_diff(base_full_state.memory_pages, current_memory_pages)
 
         new_state = HeavyPatchEmuState(new_state_id,
+                                       self.last_state_id,
                                        instruction,
                                        instruction_address,
                                        self.instruction_execution_counts[instruction_address])
