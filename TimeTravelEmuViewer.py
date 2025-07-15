@@ -42,15 +42,16 @@ PAGE_SIZE = 0x1000
 
 
 # Line types
-DATA_LINE = 0
-CODE_LINE = 1
-NAME_LINE = 2
+UNKNOW_TYPE_LINE = 0
+DATA_LINE = 1
+CODE_LINE = 2
+NAME_LINE = 3
 
 @dataclass
 class address_line_info:
     address: int
     address_idx: int = 0
-    type: int = DATA_LINE
+    type: int = UNKNOW_TYPE_LINE
     value: str = ""
     fgcolor: Optional[int] = 0x0
     bgcolor: Optional[int] = 0xFFFFFF
@@ -367,8 +368,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
 
 
 
-def to_hex_fixed_length(value, length):
-    return format(value, f"0{length}x")
 
 
 class TTE_DisassemblyViewer():
@@ -417,37 +416,39 @@ class TTE_DisassemblyViewer():
         viewer_status_bar.addPermanentWidget(QtWidgets.QLabel("Flags: OK "))
 
 
+    def LoadMemoryPages(self, range_start, range_end,  memory_pages: Dict[int, Tuple[int, bytearray]], execution_counts: Dict[int, int]):
 
+        def get_addr_type(address) -> int:
+            addr_flag = ida_bytes.get_flags(address)
+            if idc.is_code(addr_flag):
+                return CODE_LINE
+            elif idc.is_data(addr_flag):
+                return DATA_LINE
+            else:
+                return UNKNOW_TYPE_LINE
 
-
-
-
-    def LoadMemoryPages(self, memory_pages: Dict[int, Tuple[int, bytearray]]):
-        viewer_title = "TimeTravelEmuDisassembly"
 
         memory_pages_list = sorted(memory_pages.items())
+        current_addr = 0
         for start_addr, (perm, data) in memory_pages_list:
+            if current_addr < start_addr:
+                current_addr = start_addr
             assert len(data) == PAGE_SIZE
             for offset in range(PAGE_SIZE):
-                addr_str = to_hex_fixed_length(start_addr + offset, self.addr_len)
+
+                line_addr_str = format(current_addr, f"0{self.addr_len}x")
 
 
 
 
                 self.viewer.AddLine(start_addr + offset,
                                     DATA_LINE,
-                                     f".{addr_str}: {data[offset]}",
+                                     f".{line_addr_str}: {data[offset]}",
                                     None,
                                     None,
                                     True)
-
+                current_addr = start_addr + offset
         self.viewer.Refresh()
-
-
-
-
-
-
 
 
 
@@ -531,7 +532,8 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             raise ValueError("Failed to generate full state")
 
         memory_pages = last_full_state.memory_pages
-        self.disassembly_viewer.LoadMemoryPages(memory_pages)
+        execution_counts =  {item[1]: item[3] for item in state_manager.get_state_list_with_insn()}
+        self.disassembly_viewer.LoadMemoryPages(-1, -1, memory_pages ,execution_counts)
 
 
     def PopulateForm(self):
