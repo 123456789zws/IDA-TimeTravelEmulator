@@ -462,6 +462,16 @@ class TTE_DisassemblyViewer():
 
 
 class TTE_RegistersViewer:
+    """
+    a subviewer class of TimeTravelEmuViewer to display registers.
+
+    To use it following the steps:
+    1. use self.InitViewer() to initializate the viewer.
+    2. use self.LoadRegisters() to load registers lines
+    3. add self.viewer_widegt to TimeTravelEmuViewer's layout.
+    4. call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
+    """
+
     def __init__(self):
         self.viewer = ida_kernwin.simplecustviewer_t()
         self.bitness = get_bitness()
@@ -501,6 +511,10 @@ class TTE_RegistersViewer:
             self.viewer.AddLine(line_text, fgcolor=line_fgcolor)
 
         self.viewer.Refresh()
+
+
+
+
 
 
 
@@ -574,10 +588,20 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         if not last_full_state:
             raise ValueError("Failed to generate full state")
 
+
+
+
+
+
         memory_pages = last_full_state.memory_pages
         execution_counts =  {item[1]: item[3] for item in state_manager.get_state_list_with_insn()}
         self.disassembly_viewer.LoadMemoryPages(-1, -1, memory_pages ,execution_counts)
-        self.registers_viewer.LoadRegisters(last_full_state.registers_map, None)
+
+        regs_diff = None
+
+
+
+        self.registers_viewer.LoadRegisters(last_full_state.registers_map, regs_diff)
 
 
     def PopulateForm(self):

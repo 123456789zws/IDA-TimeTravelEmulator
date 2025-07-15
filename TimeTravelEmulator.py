@@ -839,7 +839,6 @@ class LightPatchEmuState(EmuState):
         self.type = EmuState.STATE_TYPE_LIGHT_PATCH
 
         self.base_full_state_id: Optional[str] = None
-        self.prev_state_id: str = ""
 
         self.reg_patches: Dict[str, int] = {} # {reg_name: patch_value}
         self.mem_patches: List[Tuple[int, int, bytes]] = [] # List[[address, size, value]...]
@@ -1168,41 +1167,8 @@ class EmuStateManager():
     #         print(st3.memory_pages)
     #         # print(self.get_state(st1.prev_state_id).generate_full_state(self.states_dict).__dict__)  #   type: ignore
 
-    def compare_states(self, state1_id: str, state2_id: str):
-        """
-        Compares any two EmuState objects (full or patch) and returns their differences.
-
-        :param EmuStateManager: An instance of EmuStateManager to extract full states if needed.
-        :param state1: The first EmuState object.
-        :param state2: The second EmuState object.
-        :return: A tuple (regs_diff, mem_diff, pages_diff) representing the differences.
-                 regs_diff: Dict of changed registers in state2 relative to state1.
-                 mem_diff: List of memory different from state1 to state2.
-                 pages_diff: List of page different from state1 to state2.
-        """
-        tte_log_dbg(f"\n--- Comparing states: {state1_id} vs {state2_id} ---")
-
-        state1 = self.get_state(state1_id)
-        state2 = self.get_state(state2_id)
-
-        assert state1, "State 1 not found: {}".format(state1_id)
-        assert state2, "State 2 not found: {}".format(state2_id)
-
-        full_state1 = state1.generate_full_state(self.states_dict)
-        full_state2 = state2.generate_full_state(self.states_dict)
-
-
-        if not full_state1:
-            tte_log_warn(f"Could not generate full state for '{state1_id}'. Comparison aborted.")
-            return
-        if not full_state2:
-            tte_log_warn(f"Could not generate full state for '{state2_id}'. Comparison aborted.")
-            return
-
-        tte_log_dbg(f"Comparison between State '{state1_id}' (Type: {state1.type}) and State '{state2_id}' (Type: {state2.type}):")
-        tte_log_dbg(f"Instruction Address: 0x{full_state1.instruction_address:X} -> 0x{full_state2.instruction_address:X}")
-        tte_log_dbg(f"Execution Count: {full_state1.execution_count} -> {full_state2.execution_count}")
-
+    @staticmethod
+    def compare_full_states(full_state1: FullEmuState, full_state2: FullEmuState):
         regs_diff = catch_dict_diff(full_state1.registers_map, full_state2.registers_map)
 
         if not regs_diff:
@@ -1239,6 +1205,103 @@ class EmuStateManager():
             pages_diff[key] = (2, full_state2.memory_pages[key])
 
         return regs_diff, mem_diff, pages_diff
+
+
+
+
+    def compare_states_fully(self, state1_id: str, state2_id: str):
+        """
+        Compares any two EmuState objects (full or patch) and returns their differences.
+        The first state must be the base state, and the second state is the target state.
+
+        :param EmuStateManager: An instance of EmuStateManager to extract full states if needed.
+        :param state1: The first EmuState object.
+        :param state2: The second EmuState object.
+        :return: A tuple (regs_diff, mem_diff, pages_diff) representing the differences.
+                 regs_diff: Dict of changed registers in state2 relative to state1.
+                 mem_diff: List of memory different from state1 to state2.
+                 pages_diff: List of page different from state1 to state2.
+        """
+        tte_log_dbg(f"\n--- Comparing states Fully: {state1_id} vs {state2_id} ---")
+
+        state1 = self.get_state(state1_id)
+        state2 = self.get_state(state2_id)
+
+        assert state1, "State 1 not found: {}".format(state1_id)
+        assert state2, "State 2 not found: {}".format(state2_id)
+
+        tte_log_dbg(f"Comparison between State '{state1_id}' (Type: {state1.type}) and State '{state2_id}' (Type: {state2.type}):")
+        tte_log_dbg(f"Instruction Address: 0x{state1.instruction_address:X} -> 0x{state2.instruction_address:X}")
+        tte_log_dbg(f"Execution Count: {state1.execution_count} -> {state2.execution_count}")
+
+        full_state1 = state1.generate_full_state(self.states_dict)
+        full_state2 = state2.generate_full_state(self.states_dict)
+
+        if not full_state1:
+            tte_log_warn(f"Could not generate full state for '{state1_id}'. Comparison aborted.")
+            return
+        if not full_state2:
+            tte_log_warn(f"Could not generate full state for '{state2_id}'. Comparison aborted.")
+            return
+
+
+        return self.compare_full_states(full_state1, full_state2)
+
+
+    @staticmethod
+    def compare_light_patch_states(states_dict, patch_state1: LightPatchEmuState, patch_state2: LightPatchEmuState):
+        regs_diff = catch_dict_diff(patch_state1.reg_patches, target_dict=patch_state2.reg_patches)
+        memory_patches = patch_state2.mem_patches.copy()
+
+        prev_full_state: Optional[EmuState] = None
+        prev_state_id = patch_state2.prev_state_id
+        while prev_state_id is not patch_state1.prev_state_id:
+            prev_state = states_dict.get(prev_state_id)
+            if prev_state is None:
+                tte_log_warn(f"Target prev_state not found")
+                return
+            if prev_state.type in [EmuState.STATE_TYPE_FULL, EmuState.STATE_TYPE_HEAVY_PATCH]:
+                tte_log_warn(f"Unexpected prev_state type")
+                return
+            elif prev_state.type == EmuState.STATE_TYPE_LIGHT_PATCH:
+                assert isinstance(prev_state, LightPatchEmuState), "Generate full State: Previous state is not a light patch state."
+                memory_patches.extend(prev_state.mem_patches)
+                prev_state_id = prev_state.prev_state_id
+
+        print(regs_diff)
+        print(memory_patches)
+
+
+    def compare_states_lightly(self, state1_id: str, state2_id: str):
+        """
+        Compares two EmuState objects (patch state and generated from the same full state ) and returns their differences.
+        The first state must be a patch state generated from the same full state, and the second state is the target state.
+
+        :return:
+                Dict of changed registers and memory patches.
+        """
+        tte_log_dbg(f"\n--- Comparing states Lightly: {state1_id} vs {state2_id} ---")
+
+        state1 = self.get_state(state1_id)
+        state2 = self.get_state(state2_id)
+
+        assert state1, "State 1 not found: {}".format(state1_id)
+        assert state2, "State 2 not found: {}".format(state2_id)
+
+
+        if state1.type == EmuState.STATE_TYPE_LIGHT_PATCH and state2.type == EmuState.STATE_TYPE_LIGHT_PATCH:
+            assert isinstance(state1, LightPatchEmuState)
+            assert isinstance(state2, LightPatchEmuState)
+            if state1.base_full_state_id == state2.base_full_state_id:
+                return self.compare_light_patch_states(self.states_dict, state1, state2)
+        else:
+            raise AssertionError("Unexpected states type and property")
+
+
+
+
+
+
 
 
 
