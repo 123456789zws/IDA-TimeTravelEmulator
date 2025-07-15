@@ -22,6 +22,11 @@ from unicorn.x86_const import *
 from capstone import *
 from PyQt5 import QtGui, QtCore, QtWidgets
 
+
+from TimeTravelEmulator import *
+
+
+
 PAGE_SIZE = 0x1000
 
 
@@ -362,64 +367,38 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
 
 
 
+def to_hex_fixed_length(value, length):
+    return format(value, f"0{length}x")
 
 
+class TTE_DisassemblyViewer():
+    """
+    a subviewer class of TimeTravelEmuViewer to display disassembly.
+
+    To use it following the steps:
+    1. use self.InitViewer() to initializate the viewer.
+    2. add some data to the viewer.
+    3. add self.viewer_widegt to TimeTravelEmuViewer's layout.
+    4. call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
+    """
 
 
-class TTE_DisassemblyViewer(ida_kernwin.PluginForm):
     def __init__(self):
         super(TTE_DisassemblyViewer, self).__init__()
         self.viewer = AddressAwareCustomViewer()
-
-
-    def LoadMemoryPage(self, memory_pages: Dict[int, Tuple[int, bytearray]]):
-        viewer_title = "TimeTravelEmuDisassembly"
-        self.icon = ":/icons/timetravel_icon.png"
-
-        # self.viewer.Create(viewer_title)
-
-        memory_pages_list = sorted(memory_pages.items())
-        for start_addr, (perm, data) in memory_pages_list:
-            assert len(data) == PAGE_SIZE
-            for offset in range(PAGE_SIZE):
-                self.viewer.AddLine(start_addr + offset,
-                                    DATA_LINE,
-                                    f"{start_addr + offset:X}: {data[offset]}",
-                                    None,
-                                    None,
-                                    True)
-
-        self.viewer.Refresh()
+        self.bitness = get_bitness()
+        if self.bitness:
+            self.addr_len = self.bitness // 4
+        else:
+            tte_log_err("Failed to get bitness")
 
 
 
-
-
-    # def _insert_memory_page(self, start_addr: int, end_addr: int, data: bytearray):
-    #     for address in range(start_addr, end_addr, 16):
-    #         addr_name = idc.get_name(address)
-    #         if addr_name:
-    #             self.viewer.AddLine(address, NAME_LINE, f"{addr_name}")
-
-
-
-
-
-
-
-
-
-    def OnCreate(self, form):
-        self.parent = self.FormToPyQtWidget(form)
-        self._InitializeViewer()
-        self.PopulateForm()
-
-
-    def _InitializeViewer(self):
-        self.viewer.Create("Disassembly Viewer")
-        self.viewer_widegt  = self.FormToPyQtWidget(self.viewer.GetWidget())
-
+    def InitViewer(self):
+        self.viewer.Create("TimeTravelEmuDisassembly")
+        self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self._SetCustomViewerStatusBar()
+
 
     def _SetCustomViewerStatusBar(self):
         # Remove original status bar
@@ -443,13 +422,26 @@ class TTE_DisassemblyViewer(ida_kernwin.PluginForm):
 
 
 
+    def LoadMemoryPages(self, memory_pages: Dict[int, Tuple[int, bytearray]]):
+        viewer_title = "TimeTravelEmuDisassembly"
 
-    def PopulateForm(self):
-        vbox = QtWidgets.QVBoxLayout()
-        vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.addWidget(self.viewer_widegt)
+        memory_pages_list = sorted(memory_pages.items())
+        for start_addr, (perm, data) in memory_pages_list:
+            assert len(data) == PAGE_SIZE
+            for offset in range(PAGE_SIZE):
+                addr_str = to_hex_fixed_length(start_addr + offset, self.addr_len)
 
-        self.parent.setLayout(vbox)
+
+
+
+                self.viewer.AddLine(start_addr + offset,
+                                    DATA_LINE,
+                                     f".{addr_str}: {data[offset]}",
+                                    None,
+                                    None,
+                                    True)
+
+        self.viewer.Refresh()
 
 
 
@@ -489,28 +481,65 @@ class TTE_StatesViewer:
 
 
 
-# class TimeTravelEmuViewer():
+class TimeTravelEmuViewer(ida_kernwin.PluginForm):
+    """
+    The main TimeTravelEmuViewer class.
 
-#     def __init__(self, states_manager: EmuStateManager):
-#         super().__init__()
-#         self.states_manager: EmuStateManager = states_manager
-#         self.disassembly_viewer: TTE_DisassemblyViewer =  TTE_DisassemblyViewer()
-#         self.memory_viewer: TTE_MemoryViewer = TTE_MemoryViewer()
-#         self.registers_viewer: TTE_RegistersViewer = TTE_RegistersViewer()
-#         self.states_viewer: TTE_StatesViewer = TTE_StatesViewer()
+    To use it, you need to do the following steps:
+    1. use self.Init() to initialize the viewer.
+    2. use self.LoadESM(state_manager) to load the EmuStateManager into the viewer.
+    3. use self.Show(“title”) to show the viewer with a title.
 
-
-#     def init(self, memory_regions: Iterator[Tuple[int, int, int]]):
-#         """
-
-#         """
-#         pass
+    """
 
 
+    def __init__(self):
+        super().__init__()
+
+        self.disassembly_viewer: TTE_DisassemblyViewer =  TTE_DisassemblyViewer()
+        self.memory_viewer: TTE_MemoryViewer = TTE_MemoryViewer()
+        self.registers_viewer: TTE_RegistersViewer = TTE_RegistersViewer()
+        self.states_viewer: TTE_StatesViewer = TTE_StatesViewer()
 
 
-#         seg_data = ida_bytes.get_bytes()
-#         self.viewer =
+    def Init(self):
+        """
+
+        """
+        self.disassembly_viewer.InitViewer()
+
+
+
+    def OnCreate(self, form):
+        self.parent = self.FormToPyQtWidget(form)
+
+        self.PopulateForm()
+
+    def LoadESM(self, state_manager: EmuStateManager):
+        """
+        Load the EmuStateManager into the viewer.
+
+        """
+
+        enter = next(reversed(state_manager.states_dict.items()))
+        if not enter:
+            raise ValueError("No state found in state_manager")
+        last_key, last_state  = enter
+
+        last_full_state = last_state.generate_full_state(state_manager.states_dict)
+        if not last_full_state:
+            raise ValueError("Failed to generate full state")
+
+        memory_pages = last_full_state.memory_pages
+        self.disassembly_viewer.LoadMemoryPages(memory_pages)
+
+
+    def PopulateForm(self):
+        vbox = QtWidgets.QVBoxLayout()
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.addWidget(self.disassembly_viewer.viewer_widegt)
+
+        self.parent.setLayout(vbox)
 
 
 

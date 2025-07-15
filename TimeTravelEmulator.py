@@ -37,7 +37,7 @@ PAGE_SIZE = 0x1000
 PAGE_MASK = ~(PAGE_SIZE - 1)
 
 # Define default page permission
-DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ | UC_PROT_EXEC
+DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
 
 
 
@@ -253,7 +253,7 @@ def catch_bytes_diff(
             continue
         _, base_bytes = entry
         if base_bytes != target_bytes:
-            patches[addr] = (permossion, bsdiff4.diff(base_bytes, target_bytes))
+            patches[addr] = (permossion, bsdiff4.diff(bytes(base_bytes), bytes(target_bytes)))
         else:
             patches[addr] = (permossion, b'')
 
@@ -281,8 +281,8 @@ def apply_bytes_patch(
         assert key_data is not None, f"Error: key {addr} not found in base_bytes_dict"
         _, original_data = key_data
         try:
-            patched_data = bsdiff4.patch(original_data, patch)
-            updated_dict[addr] = (permossion, patched_data)
+            patched_data = bsdiff4.patch(bytes(original_data), patch)
+            updated_dict[addr] = (permossion, bytearray(patched_data))
         except Exception as e:
             raise RuntimeError(f"Error applying patch to key {addr}: {e}")
 
@@ -401,7 +401,7 @@ def tte_log_err(message):
 
 @dataclass
 class EmuSettings():
-    start = 0x7FF745371450#start#
+    start = 0x140001450#start#
     end = -1#0x14000201C#end#
     # emulate_step_limit = 10
     is_load_registers = False
@@ -409,7 +409,7 @@ class EmuSettings():
     is_log = True
     is_map_mem_permissions = True
     time_out = 0  #TODO: add it in emusetting form
-    count = 300  #TODO: add it in emusetting form
+    count = 500  #TODO: add it in emusetting form
     log_level = logging.DEBUG #TODO: add it in emusetting form
 
 
@@ -1056,10 +1056,10 @@ class EmuStateManager():
         return self.states_dict.get(state_id, None)
 
 
-    def get_state_list_with_insn(self) -> List[Tuple[str, str]]:
-        result: List[Tuple[str, str]] = []
+    def get_state_list_with_insn(self) -> List[Tuple[str, int, str, int]]:
+        result: List[Tuple[str, int, str, int]] = []
         for state_id, state in self.states_dict.items():
-            result.append((state_id, state.instruction))
+            result.append((state_id, state.instruction_address, state.instruction, state.execution_count))
         return result
 
     def _determine_next_state_type(self):
