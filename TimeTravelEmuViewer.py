@@ -1,4 +1,6 @@
+import re
 import idaapi
+import ida_lines
 import ida_ida
 import ida_kernwin
 import logging
@@ -366,7 +368,15 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         return None
 
 
+class ColorfulLineGenerator():
+    def __init__(self):
+        pass
 
+    @staticmethod
+    def generate_register_line(reg_name, reg_value, value_len) -> str:
+        colored_reg_name = f" {reg_name:>6}"
+        colored_reg_value = ida_lines.COLSTR(f"0x{reg_value:0{value_len}X}", ida_lines.SCOLOR_SYMBOL)
+        return colored_reg_name + ": " + colored_reg_value
 
 
 
@@ -478,9 +488,7 @@ class TTE_RegistersViewer:
     def LoadRegisters(self, registers: Dict[str, int], regs_diff: Optional[Dict[str, int]]):
         changed_fgcolor = 0x00FF00 # Green
 
-        for reg_name in registers:
-            reg_value = registers[reg_name]
-            formatted_value = f"0x{reg_value:0{self.hex_len}X}"
+        for reg_name, reg_value in registers.items():
 
             line_fgcolor = None
 
@@ -489,7 +497,7 @@ class TTE_RegistersViewer:
                 regs_diff[reg_name] != reg_value:
                 line_fgcolor = changed_fgcolor
 
-            line_text = f"  {reg_name:>6}: {formatted_value}"
+            line_text = ColorfulLineGenerator.generate_register_line(reg_name, reg_value, self.hex_len)
             self.viewer.AddLine(line_text, fgcolor=line_fgcolor)
 
         self.viewer.Refresh()

@@ -1,6 +1,5 @@
-import re
-from unittest import result
 import idaapi
+import ida_lines
 import ida_ida
 import ida_kernwin
 import logging
@@ -73,55 +72,55 @@ ARCH_TO_INSN_POINTER_MAP = {
 UNICORN_REGISTERS_MAP = {
     "x64" : {
         # General Purpose Registers (GPRs)
-        "rax": UC_X86_REG_RAX,
-        "rbx": UC_X86_REG_RBX,
-        "rcx": UC_X86_REG_RCX,
-        "rdx": UC_X86_REG_RDX,
-        "rsi": UC_X86_REG_RSI,
-        "rdi": UC_X86_REG_RDI,
-        "rbp": UC_X86_REG_RBP,
-        "rsp": UC_X86_REG_RSP,
-        "r8": UC_X86_REG_R8,
-        "r9": UC_X86_REG_R9,
-        "r10": UC_X86_REG_R10,
-        "r11": UC_X86_REG_R11,
-        "r12": UC_X86_REG_R12,
-        "r13": UC_X86_REG_R13,
-        "r14": UC_X86_REG_R14,
-        "r15": UC_X86_REG_R15,
+        "RAX": UC_X86_REG_RAX,
+        "RBX": UC_X86_REG_RBX,
+        "RCX": UC_X86_REG_RCX,
+        "RDX": UC_X86_REG_RDX,
+        "RSI": UC_X86_REG_RSI,
+        "RDI": UC_X86_REG_RDI,
+        "RBP": UC_X86_REG_RBP,
+        "RSP": UC_X86_REG_RSP,
+        "R8": UC_X86_REG_R8,
+        "R9": UC_X86_REG_R9,
+        "R10": UC_X86_REG_R10,
+        "R11": UC_X86_REG_R11,
+        "R12": UC_X86_REG_R12,
+        "R13": UC_X86_REG_R13,
+        "R14": UC_X86_REG_R14,
+        "R15": UC_X86_REG_R15,
         # Instruction Pointer
-        "rip": UC_X86_REG_RIP,
+        "RIP": UC_X86_REG_RIP,
         # Flags Register
-        "rflags": UC_X86_REG_EFLAGS, # In 64-bit, EFLAGS is extended to RFLAGS, but the constant remains EFLAGS
+        "Rflags": UC_X86_REG_EFLAGS, # In 64-bit, EFLAGS is extended to RFLAGS, but the constant remains EFLAGS
         # Segment Registers
-        "cs": UC_X86_REG_CS,
-        "ss": UC_X86_REG_SS,
-        "ds": UC_X86_REG_DS,
-        "es": UC_X86_REG_ES,
-        "fs": UC_X86_REG_FS,
-        "gs": UC_X86_REG_GS,
+        "CS": UC_X86_REG_CS,
+        "SS": UC_X86_REG_SS,
+        "DS": UC_X86_REG_DS,
+        "ES": UC_X86_REG_ES,
+        "FS": UC_X86_REG_FS,
+        "GS": UC_X86_REG_GS,
     },
     "x86": {
         # General Purpose Registers (GPRs)
-        "eax": UC_X86_REG_EAX,
-        "ebx": UC_X86_REG_EBX,
-        "ecx": UC_X86_REG_ECX,
-        "edx": UC_X86_REG_EDX,
-        "esi": UC_X86_REG_ESI,
-        "edi": UC_X86_REG_EDI,
-        "ebp": UC_X86_REG_EBP,
-        "esp": UC_X86_REG_ESP,
+        "EAX": UC_X86_REG_EAX,
+        "EBX": UC_X86_REG_EBX,
+        "ECX": UC_X86_REG_ECX,
+        "EDX": UC_X86_REG_EDX,
+        "ESI": UC_X86_REG_ESI,
+        "EDI": UC_X86_REG_EDI,
+        "EBP": UC_X86_REG_EBP,
+        "ESP": UC_X86_REG_ESP,
         # Instruction Pointer
-        "eip": UC_X86_REG_EIP,
+        "EIP": UC_X86_REG_EIP,
         # Flags Register
-        "eflags": UC_X86_REG_EFLAGS,
+        "Eflags": UC_X86_REG_EFLAGS,
         # Segment Registers
-        "cs": UC_X86_REG_CS,
-        "ss": UC_X86_REG_SS,
-        "ds": UC_X86_REG_DS,
-        "es": UC_X86_REG_ES,
-        "fs": UC_X86_REG_FS,
-        "gs": UC_X86_REG_GS,
+        "CS": UC_X86_REG_CS,
+        "SS": UC_X86_REG_SS,
+        "DS": UC_X86_REG_DS,
+        "ES": UC_X86_REG_ES,
+        "FS": UC_X86_REG_FS,
+        "GS": UC_X86_REG_GS,
     }
 }
 
@@ -668,12 +667,14 @@ class EmuExecuter():
             while(self._is_memory_mapped(DEFAULT_STACK_POINT_VALUE + offset)):
                 offset += 0x1000000
             if self.unicorn_mode == UC_MODE_64:
-                stack_point, base_point  = UNICORN_REGISTERS_MAP[self.arch]['rsp'], UNICORN_REGISTERS_MAP[self.arch]['rsp']
+                stack_point, frame_point  = UNICORN_REGISTERS_MAP[self.arch]['RSP'], UNICORN_REGISTERS_MAP[self.arch]['RSP']
             elif self.unicorn_mode == UC_MODE_32:
-                stack_point, base_point  = UNICORN_REGISTERS_MAP[self.arch]['esp'], UNICORN_REGISTERS_MAP[self.arch]['ebp']
+                stack_point, frame_point  = UNICORN_REGISTERS_MAP[self.arch]['ESP'], UNICORN_REGISTERS_MAP[self.arch]['ESP']
+            else:
+                raise AssertionError("Invalid unicorn mode")
 
             self.mu.reg_write(stack_point, DEFAULT_STACK_POINT_VALUE + offset)
-            self.mu.reg_write(base_point, DEFAULT_BASE_POINT_VALUE + offset)
+            self.mu.reg_write(frame_point, DEFAULT_BASE_POINT_VALUE + offset)
             tte_log_info(f"Init regs: Sets registers default stack regs value: sp = {DEFAULT_STACK_POINT_VALUE + offset:X}, bp = {DEFAULT_BASE_POINT_VALUE + offset:X}")
 
 
