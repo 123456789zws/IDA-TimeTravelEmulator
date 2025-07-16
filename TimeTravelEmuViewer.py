@@ -1,3 +1,6 @@
+import re
+
+from exceptiongroup import catch
 import idaapi
 import ida_lines
 import ida_ida
@@ -14,7 +17,7 @@ from collections import defaultdict
 from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
 from copy import deepcopy
 from attr import dataclass
-
+from re import split
 
 
 import bsdiff4
@@ -368,6 +371,55 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 return info.address
         return None
 
+    def _JumpToWord(self, word):
+        print(f"Jump to {word}")
+        ea = None
+        if all(c in "x0123456789abcdefABCDEF" for c in word):
+            try:
+                ea = int(word,16) # word is a address
+            except ValueError:
+                pass
+        else:
+            segm = idaapi.get_segm_by_name(word)
+            if segm:
+                ea = segm.start_ea # word is a segment name
+            else:
+                ea =  idaapi.str2ea(word) # word is a name
+
+        if ea == idaapi.BADADDR:
+            result: List[str] = split(r'\.|:|;|\+|-|\[|\]', word)
+            if result:
+                print(result)
+                for w in reversed(result):
+                    ea =  idaapi.str2ea(w)
+                    if ea != idaapi.BADADDR:
+                        break
+
+        if ea:
+            return idaapi.jumpto(ea)
+        return False
+
+
+    def OnDblClick(self, shift):
+        dblclick_word = self.GetCurrentWord()
+        if not dblclick_word:
+            return False
+        return self._JumpToWord(dblclick_word)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 class ColorfulLineGenerator():
     def __init__(self):
@@ -514,7 +566,7 @@ class TTE_DisassemblyViewer():
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr], data_size)
                     self.viewer.AddLine(current_addr, CODE_LINE, line_text)
 
-                    current_addr += code_size
+                    current_addr += data_size
                     continue
                 else:
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr], 1)
