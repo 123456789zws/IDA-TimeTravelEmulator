@@ -409,7 +409,7 @@ class EmuSettings():
     is_map_mem_permissions = True
     time_out = 0  #TODO: add it in emusetting form
     count = 30  #TODO: add it in emusetting form
-    log_level = logging.DEBUG #TODO: add it in emusetting form
+    log_level = logging.WARNING #TODO: add it in emusetting form
 
 
 class EmuSettingsForm(idaapi.Form):

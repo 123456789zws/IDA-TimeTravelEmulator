@@ -1,3 +1,4 @@
+import bisect
 import re
 
 from exceptiongroup import catch
@@ -14,7 +15,7 @@ import ida_segment
 
 from abc import ABC
 from collections import defaultdict
-from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 from copy import deepcopy
 from attr import dataclass
 from re import split
@@ -22,6 +23,7 @@ from re import split
 
 import bsdiff4
 from sortedcontainers import SortedList
+from sympy import false
 from unicorn import *
 from unicorn.x86_const import *
 from capstone import *
@@ -75,6 +77,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         self._lines_data_buffer: List[address_line_info] = []
 
         self.need_rebuild = False # Flag to indicate if the viewer needs to be refreshed
+        self.keydown_callback_list: List[Tuple[int, bool, Callable]] = [] # List[(ord_key, is_shift, callback_func)], Callback functions list called when corresponding keys is down
 
 
     def _get_lineno_left_from_address(self, address):
@@ -313,8 +316,9 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         :return: Boolean indicating success.
         """
         self.CheckRebuild()
-        lineno = self._get_lineno_left_from_address(address)
-        if lineno != -1:
+        idx = self._lines_data.bisect_right(address_line_info(address = address))
+        if idx > 0:
+            lineno = idx - 1
             return super().Jump(lineno, x, y)
         return False
 
@@ -366,13 +370,10 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         self.CheckRebuild()
         lineno = super().GetLineNo(mouse)
         if lineno != -1:
-            info = self._get_address_info_from_lineno(lineno)
-            if info is not None:
-                return info.address
+            return lineno
         return None
 
     def _JumpToWord(self, word):
-        print(f"Jump to {word}")
         ea = None
         if all(c in "x0123456789abcdefABCDEF" for c in word):
             try:
@@ -389,7 +390,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         if ea == idaapi.BADADDR:
             result: List[str] = split(r'\.|:|;|\+|-|\[|\]', word)
             if result:
-                print(result)
                 for w in reversed(result):
                     ea =  idaapi.str2ea(w)
                     if ea != idaapi.BADADDR:
@@ -407,11 +407,19 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         return self._JumpToWord(dblclick_word)
 
 
+    def OnKeydown(self, vkey, shift):
+        for key, need_shift, callback in self.keydown_callback_list:
+            if key == vkey and (not need_shift or shift):
+                callback(self)
 
 
+    def AddKeyDownCallback(self, target_vkey: int, need_shift: bool, callback):
+        """
+        Add keydown callback function for this viewer
 
-
-
+        callback function receive parameters: the customviewer itself.
+        """
+        self.keydown_callback_list.append((target_vkey, need_shift, callback))
 
 
 
@@ -474,10 +482,11 @@ class TTE_DisassemblyViewer():
     a subviewer class of TimeTravelEmuViewer to display disassembly.
 
     To use it following the steps:
-    1. use self.InitViewer() to initializate the viewer.
-    2. add some data to the viewer.
-    3. add self.viewer_widegt to TimeTravelEmuViewer's layout.
-    4. call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
+    1. Use self.InitViewer() to initializate the viewer.
+    2. Set data: including self.memory_pages_list and self.execution_counts
+    3. Add self.viewer_widegt to TimeTravelEmuViewer's layout.
+    4. Use self.DisplayMemoryPages to display memory pages in range.
+    5. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
 
@@ -489,12 +498,49 @@ class TTE_DisassemblyViewer():
         else:
             tte_log_err("Failed to get bitness")
 
+        self.memory_pages_list = None
+        self.execution_counts = None
+
+        self.current_range_display_start: int = -1;
+        self.current_range_display_end: int = -1;
+
 
 
     def InitViewer(self):
         self.viewer.Create("TimeTravelEmuDisassembly")
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self._SetCustomViewerStatusBar()
+
+        self.viewer.AddKeyDownCallback(ord("G"), False, self.cb_InputJump)
+
+
+    def cb_InputJump(self, viewer: AddressAwareCustomViewer):
+        assert self.memory_pages_list, "State data not loaded"
+
+        n = viewer.GetLineNo()
+        if n is not None:
+            target_addr = ida_kernwin.ask_addr(viewer.GetLineNo(), "Where to go?")
+            if target_addr:
+                if self.current_range_display_start < target_addr and self.current_range_display_end > target_addr:
+                    viewer.Jump(target_addr, 5, 0)
+
+                else:
+                    # page undisplay
+                    starts = [entry[0] for entry in self.memory_pages_list]
+                    idx = bisect.bisect_right(starts, target_addr) - 1
+
+                    if idx >= 0 and 0 <= target_addr - starts[idx] < PAGE_SIZE:
+                        self.DisplayMemoryPages(starts[idx], starts[idx]+ PAGE_SIZE)
+                        viewer.Jump(target_addr, 5, 0)
+                    else:
+                        idaapi.warning("Target address not loaded")
+        return None
+
+
+
+
+
+
 
 
     def _SetCustomViewerStatusBar(self):
@@ -514,15 +560,23 @@ class TTE_DisassemblyViewer():
         viewer_status_bar.addPermanentWidget(QtWidgets.QLabel("Flags: OK "))
 
 
-    def LoadMemoryPages(self, range_start, range_end,  memory_pages: Dict[int, Tuple[int, bytearray]], state_list: List[Tuple[str, int, bytes, int]]):
-
-        memory_pages_list = sorted(memory_pages.items())
-        execution_counts =  {item[1]: item[3] for item in state_list}
+    def LoadListFromESM(self, state_list: List[Tuple[str, int, bytes, int]]):
+        self.execution_counts= {item[1]: item[3] for item in state_list}
 
 
+    def LoadStateMemory(self, memory_pages: Dict[int, Tuple[int, bytearray]]):
+        self.memory_pages_list = sorted(memory_pages.items())
+        print(self.memory_pages_list)
+
+
+    def DisplayMemoryPages(self, range_start, range_end):
+        assert self.memory_pages_list and self.execution_counts, "State data not loaded"
+        self.current_range_display_start = range_start
+        self.current_range_display_end = range_end
+        self.viewer.ClearLines()
 
         current_addr = range_start
-        for start_addr, (perm, data) in memory_pages_list:
+        for start_addr, (perm, data) in self.memory_pages_list:
             assert len(data) == PAGE_SIZE
 
             if start_addr + PAGE_SIZE > range_end or start_addr + PAGE_SIZE <= range_start:
@@ -537,8 +591,8 @@ class TTE_DisassemblyViewer():
 
             while current_addr < start_addr + PAGE_SIZE:
                 count = 0
-                if current_addr in execution_counts:
-                    count = execution_counts[current_addr]
+                if current_addr in self.execution_counts:
+                    count = self.execution_counts[current_addr]
 
                 current_addr_flag = ida_bytes.get_flags(current_addr)
 
@@ -732,6 +786,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.state_list = self.state_manager.get_state_list()
 
+        self.disassembly_viewer.LoadListFromESM(self.state_list);
 
 
         self.SwitchStateDisplay(last_key)
@@ -770,8 +825,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
         assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
 
+        self.disassembly_viewer.LoadStateMemory(target_full_state.memory_pages)
 
-        self.disassembly_viewer.LoadMemoryPages(0x140001000, 0x140003000, target_full_state.memory_pages ,self.state_list)
+
+        self.disassembly_viewer.DisplayMemoryPages(0x140001000, 0x140003000, )
+
+
+
 
         regs_diff = None
         mem_diff = None
