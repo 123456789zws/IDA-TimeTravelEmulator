@@ -1,4 +1,3 @@
-import re
 import idaapi
 import ida_lines
 import ida_ida
@@ -163,7 +162,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             if address < last_line_info.address:
                 # The address is out of order and cannot be added directly. Forced to go to lazy mode
                 is_appending = False
-                print(
+                tte_log_dbg(
                     f"AddLine: Incoming address {hex(address)} is out of order "
                     f"(less than last address {hex(last_line_info.address)}). "
                     f"Forcing lazy rebuild for correct sorting."
@@ -567,6 +566,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.registers_viewer: TTE_RegistersViewer = TTE_RegistersViewer()
         self.mempages_viewer: TTE_MemoryViewer = TTE_MemoryViewer()
 
+        self.state_manager: Optional[EmuStateManager] = None
+
+
 
     def Init(self):
         self.disassembly_viewer.InitViewer()
@@ -584,38 +586,19 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         Load the EmuStateManager into the viewer.
 
         """
+        self.state_manager = state_manager
+
 
         enter = next(reversed(state_manager.states_dict.items()))
         if not enter:
             raise ValueError("No state found in state_manager")
         last_key, last_state  = enter
 
-        last_full_state = last_state.generate_full_state(state_manager.states_dict)
-        if not last_full_state:
-            raise ValueError("Failed to generate full state")
+        self.execution_counts =  {item[1]: item[3] for item in self.state_manager.get_state_list_with_insn()}
 
 
 
-
-
-
-        memory_pages = last_full_state.memory_pages
-        execution_counts =  {item[1]: item[3] for item in state_manager.get_state_list_with_insn()}
-        self.disassembly_viewer.LoadMemoryPages(-1, -1, memory_pages ,execution_counts)
-
-        regs_diff = None
-        mem_diff = None
-        entry= state_manager.get_state_change(last_full_state.state_id)
-
-        if entry:
-            regs_diff, mem_diff = entry
-            regs_diff = list(regs_diff)
-
-            print(regs_diff)
-            print(mem_diff)
-
-
-        self.registers_viewer.LoadRegisters(last_full_state.state_id, last_full_state.registers_map, regs_diff)
+        self.SwitchStateDisplay(last_key)
 
 
     def PopulateForm(self):
@@ -641,6 +624,28 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
 
+
+    def SwitchStateDisplay(self, state_id: str):
+        assert self.state_manager is not None, "No state_manager loaded"
+
+        target_state = self.state_manager.get_state(state_id)
+        assert target_state is not None, f"State {state_id} not found in state_manager"
+
+        target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
+        assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
+
+
+        self.disassembly_viewer.LoadMemoryPages(-1, -1, target_full_state.memory_pages ,self.execution_counts)
+
+        regs_diff = None
+        mem_diff = None
+        entry= self.state_manager.get_state_change(target_full_state.state_id)
+
+        if entry:
+            regs_diff, mem_diff = entry
+            regs_diff = list(regs_diff)
+
+        self.registers_viewer.LoadRegisters(target_full_state.state_id, target_full_state.registers_map, regs_diff)
 
 
 

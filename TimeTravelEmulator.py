@@ -1039,36 +1039,6 @@ class EmuStateManager():
         tte_log_dbg(f"State Manager: Created FULL state: {new_state_id}")
 
 
-    def _create_light_patch_state(self,
-                                  new_state_id: str,
-                                  instruction: str,
-                                  instruction_address:int,
-                                  current_registers_map: Dict[str, int],
-                                  memory_patches: List[Tuple[int, int, bytes]]) -> None:
-        assert self.last_full_state_id is not None, "No full base state available for patch creation."
-        assert self.last_state_id is not None, "No previous state available for patch creation."
-
-        base_full_state: Optional[FullEmuState] = self.get_state(self.last_full_state_id) # type: ignore
-        assert base_full_state is not None, "No full base state available for patch creation."
-        assert isinstance(base_full_state, FullEmuState), "Base state is not a full state."
-
-        reg_patches = catch_dict_diff(base_full_state.registers_map, current_registers_map)
-
-        new_state = LightPatchEmuState(new_state_id,
-                                       self.last_state_id,
-                                       instruction,
-                                       instruction_address,
-                                       self.instruction_execution_counts[instruction_address])
-        new_state.set_data(self.last_full_state_id, reg_patches, memory_patches)
-
-        self.states_dict[new_state_id] = new_state
-
-        self.patch_chain_count += 1
-        self.cumulative_diff_size += len(memory_patches)
-        self.last_state_id = new_state_id # Update the last status id
-        tte_log_dbg(f"State Manager: Created LIGHT PATCH state: {new_state_id}, base:{new_state.base_full_state_id},  prev: {new_state.prev_state_id}")
-
-
     def _create_heavy_patch_state(self,
                                   new_state_id: str,
                                   instruction: str,
@@ -1100,6 +1070,37 @@ class EmuStateManager():
         self.cumulative_diff_size += len(mem_bsdiff_patches)
         self.last_state_id = new_state_id # Update the last status id
         tte_log_dbg(f"State Manager: Created HEAVY PATCH state: {new_state_id}, base: {new_state.base_full_state_id}")
+
+
+
+    def _create_light_patch_state(self,
+                                  new_state_id: str,
+                                  instruction: str,
+                                  instruction_address:int,
+                                  current_registers_map: Dict[str, int],
+                                  memory_patches: List[Tuple[int, int, bytes]]) -> None:
+        assert self.last_full_state_id is not None, "No full base state available for patch creation."
+        assert self.last_state_id is not None, "No previous state available for patch creation."
+
+        base_full_state: Optional[FullEmuState] = self.get_state(self.last_full_state_id) # type: ignore
+        assert base_full_state is not None, "No full base state available for patch creation."
+        assert isinstance(base_full_state, FullEmuState), "Base state is not a full state."
+
+        reg_patches = catch_dict_diff(base_full_state.registers_map, current_registers_map)
+
+        new_state = LightPatchEmuState(new_state_id,
+                                       self.last_state_id,
+                                       instruction,
+                                       instruction_address,
+                                       self.instruction_execution_counts[instruction_address])
+        new_state.set_data(self.last_full_state_id, reg_patches, memory_patches)
+
+        self.states_dict[new_state_id] = new_state
+
+        self.patch_chain_count += 1
+        self.cumulative_diff_size += len(memory_patches)
+        self.last_state_id = new_state_id # Update the last status id
+        tte_log_dbg(f"State Manager: Created LIGHT PATCH state: {new_state_id}, base:{new_state.base_full_state_id},  prev: {new_state.prev_state_id}")
 
 
     def get_state(self, state_id: Optional[str]) -> Optional[EmuState]:
@@ -1226,7 +1227,7 @@ class EmuStateManager():
 
 
 
-    def compare_states_fully(self, state1_id: str, state2_id: str):
+    def compare_states(self, state1_id: str, state2_id: str):
         """
         Compares any two EmuState objects (full or patch) and returns their differences.
         The first state must be the base state, and the second state is the target state.
@@ -1263,11 +1264,11 @@ class EmuStateManager():
 
         regs_diff = catch_dict_diff(full_state1.registers_map, full_state2.registers_map)
         if not regs_diff:
-            print("No register differences found.")
+            tte_log_dbg("No register differences found.")
         else:
             for reg_name, new_val in regs_diff.items():
                 old_val = full_state1.registers_map.get(reg_name, "N/A")
-                print(f"  {reg_name}: 0x{old_val:X} -> 0x{new_val:X}")
+                tte_log_dbg(f"  {reg_name}: 0x{old_val:X} -> 0x{new_val:X}")
 
         mem_diff = SortedDict()
         def catch_mem_diff(page_start_addr, bytes1: bytearray, bytes2: bytearray):
