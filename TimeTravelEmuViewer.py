@@ -6,6 +6,7 @@ import logging
 import ida_nalt
 import idc
 import ida_bytes
+import ida_name
 import ida_segment
 
 from abc import ABC
@@ -43,16 +44,17 @@ CHAMGE_HIGHLIGHT_COLOR   = 0xFFD073
 
 
 # Line types
-UNKNOW_TYPE_LINE = 0
+UNKNOW_LINE = 0
 DATA_LINE = 1
 CODE_LINE = 2
 NAME_LINE = 3
+EMPTY_LINE = 4
 
 @dataclass
 class address_line_info:
     address: int
     address_idx: int = 0
-    type: int = UNKNOW_TYPE_LINE
+    type: int = UNKNOW_LINE
     value: str = ""
     fgcolor: Optional[int] = 0x0
     bgcolor: Optional[int] = 0xFFFFFF
@@ -372,10 +374,46 @@ class ColorfulLineGenerator():
         pass
 
     @staticmethod
-    def generate_register_line(reg_name, reg_value, value_len) -> str:
-        colored_reg_name = f" {reg_name:>6}"
+    def GenerateRegisterLine(reg_name, reg_value, value_len) -> str:
+        colored_reg_name = ida_lines.COLSTR(f" {reg_name:>6}", ida_lines.SCOLOR_DEFAULT)
         colored_reg_value = ida_lines.COLSTR(f"0x{reg_value:0{value_len}X}", ida_lines.SCOLOR_SYMBOL)
         return colored_reg_name + ": " + colored_reg_value
+
+    @staticmethod
+    def GenerateDisassemblyDataLine(address, address_len, value, value_len) -> str:
+        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
+        colored_value = ida_lines.COLSTR(f"0x{value:0{value_len}X}", ida_lines.SCOLOR_NUMBER)
+        return f"     {addr_str}  {colored_value}"
+
+    @staticmethod
+    def GenerateDisassemblyNameLine(address, address_len) -> str:
+        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
+        name_str = ida_name.get_nice_colored_name(address)
+        return f"     {addr_str}  {name_str}"
+
+    @staticmethod
+    def GenerateDisassemblyCodeLine(address, address_len, value, value_len, execution_counts) -> str:
+        if execution_counts == 0:
+            execution_counts_str = "    "
+        elif execution_counts == 1:
+            execution_counts_str = ida_lines.COLSTR(f"{execution_counts: 4}", ida_lines.SCOLOR_AUTOCMT)
+        else:
+            execution_counts_str = ida_lines.COLSTR(f"{execution_counts: 4}", ida_lines.SCOLOR_REGCMT)
+
+
+        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
+        insn = ida_lines.generate_disasm_line(address)
+        return f"{execution_counts_str} {addr_str}  {insn}"
+
+    @staticmethod
+    def GenerateUnknownLine(address, address_len):
+        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_DREFTAIL)
+        return f"     {addr_str}  ??"
+
+    @staticmethod
+    def GenerateEmptyLine(address, address_len):
+        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
+        return f"     {addr_str}  "
 
 
 
@@ -424,39 +462,82 @@ class TTE_DisassemblyViewer():
         viewer_status_bar.addPermanentWidget(QtWidgets.QLabel("Flags: OK "))
 
 
-    def LoadMemoryPages(self, range_start, range_end,  memory_pages: Dict[int, Tuple[int, bytearray]], execution_counts: Dict[int, int]):
-
-        def get_addr_type(address) -> int:
-            addr_flag = ida_bytes.get_flags(address)
-            if idc.is_code(addr_flag):
-                return CODE_LINE
-            elif idc.is_data(addr_flag):
-                return DATA_LINE
-            else:
-                return UNKNOW_TYPE_LINE
-
+    def LoadMemoryPages(self, range_start, range_end,  memory_pages: Dict[int, Tuple[int, bytearray]], state_list: List[Tuple[str, int, bytes, int]]):
 
         memory_pages_list = sorted(memory_pages.items())
-        current_addr = 0
+        execution_counts =  {item[1]: item[3] for item in state_list}
+
+
+
+        current_addr = range_start
         for start_addr, (perm, data) in memory_pages_list:
-            if current_addr < start_addr:
-                current_addr = start_addr
             assert len(data) == PAGE_SIZE
-            for offset in range(PAGE_SIZE):
 
-                line_addr_str = format(current_addr, f"0{self.addr_len}x")
+            if start_addr + PAGE_SIZE > range_end or start_addr + PAGE_SIZE <= range_start:
+                continue
+
+            # Process empty addresses that may exist before the current page
+            while current_addr < start_addr:
+                line_text = ColorfulLineGenerator.GenerateUnknownLine(current_addr, self.addr_len)
+                self.viewer.AddLine(current_addr, UNKNOW_LINE, line_text)
+                self.viewer.AddLine(current_addr, UNKNOW_LINE, line_text)
+                current_addr += 1
+
+            while current_addr < start_addr + PAGE_SIZE:
+                count = 0
+                if current_addr in execution_counts:
+                    count = execution_counts[current_addr]
+
+                current_addr_flag = ida_bytes.get_flags(current_addr)
+
+                is_named = ida_bytes.has_any_name(current_addr_flag)
+                if is_named:
+                    empty_line_text = ColorfulLineGenerator.GenerateEmptyLine(current_addr, self.addr_len)
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyNameLine(current_addr, self.addr_len)
+                    self.viewer.AddLine(current_addr, EMPTY_LINE, empty_line_text)
+                    self.viewer.AddLine(current_addr, NAME_LINE, line_text)
+
+                if idc.is_code(current_addr_flag):
+                    code_size = idc.get_item_size(current_addr)
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyCodeLine(current_addr,
+                                                                                       self.addr_len,
+                                                                                       data[current_addr - start_addr],
+                                                                                       code_size,
+                                                                                       count)
+                    self.viewer.AddLine(current_addr, CODE_LINE, line_text)
+
+                    current_addr += code_size
+                    continue
+
+                elif idc.is_data(current_addr_flag):
+                    data_size = idc.get_item_size(current_addr)
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr], data_size)
+                    self.viewer.AddLine(current_addr, CODE_LINE, line_text)
+
+                    current_addr += code_size
+                    continue
+                else:
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr], 1)
+                    self.viewer.AddLine(current_addr, CODE_LINE, line_text)
+
+                    current_addr += 1
+                    continue
+
+            # After processing all memory pages, fill in the possible empty addresses.
+            while current_addr < range_end:
+                line_text = ColorfulLineGenerator.GenerateUnknownLine(current_addr, self.addr_len)
+                self.viewer.AddLine(current_addr, UNKNOW_LINE, line_text)
+                current_addr += 1
 
 
 
 
-                self.viewer.AddLine(start_addr + offset,
-                                    DATA_LINE,
-                                     f".{line_addr_str}: {data[offset]}",
-                                    None,
-                                    None,
-                                    True)
-                current_addr = start_addr + offset
-        self.viewer.Refresh()
+
+
+
+
+
+
 
 
 
@@ -512,12 +593,15 @@ class TTE_RegistersViewer:
             if regs_diff is not None and reg_name in regs_diff:
                 line_bgcolor = changed_fgcolor
 
-            line_text = ColorfulLineGenerator.generate_register_line(reg_name, reg_value, self.hex_len)
+            line_text = ColorfulLineGenerator.GenerateRegisterLine(reg_name, reg_value, self.hex_len)
             self.viewer.AddLine(line_text, bgcolor=line_bgcolor)
 
         self.viewer.Refresh()
 
         self._RefreshStatusBar(state_id)
+
+
+
 
 
 
@@ -594,7 +678,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             raise ValueError("No state found in state_manager")
         last_key, last_state  = enter
 
-        self.execution_counts =  {item[1]: item[3] for item in self.state_manager.get_state_list_with_insn()}
+        self.state_list = self.state_manager.get_state_list()
 
 
 
@@ -635,7 +719,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
 
 
-        self.disassembly_viewer.LoadMemoryPages(-1, -1, target_full_state.memory_pages ,self.execution_counts)
+        self.disassembly_viewer.LoadMemoryPages(0x140001000, 0x140003000, target_full_state.memory_pages ,self.state_list)
 
         regs_diff = None
         mem_diff = None

@@ -400,7 +400,7 @@ def tte_log_err(message):
 
 @dataclass
 class EmuSettings():
-    start = 0x07FF7733B1450#start#
+    start = 0x140001450#0x07FF7733B1450#start#
     end = -1#0x14000201C#end#
     # emulate_step_limit = 10
     is_load_registers = False
@@ -408,7 +408,7 @@ class EmuSettings():
     is_log = True
     is_map_mem_permissions = True
     time_out = 0  #TODO: add it in emusetting form
-    count = 18  #TODO: add it in emusetting form
+    count = 30  #TODO: add it in emusetting form
     log_level = logging.DEBUG #TODO: add it in emusetting form
 
 
@@ -757,7 +757,7 @@ class EmuState(ABC):
     def __init__(self,
                  state_id: str,
                  prev_state_id: str = "",
-                 instruction: str = "",
+                 instruction: bytes = b"",
                  instruction_address: int = -1,
                  execution_count: int = -1) -> None:
         self.state_id = state_id
@@ -779,7 +779,7 @@ class FullEmuState(EmuState):
     def __init__(self,
                  state_id: str,
                  prev_state_id: str = "",
-                 instruction: str = "",
+                 instruction: bytes = b"",
                  instruction_address: int = -1,
                  execution_count: int = -1) -> None:
         super().__init__(state_id,
@@ -815,7 +815,7 @@ class HeavyPatchEmuState(EmuState):
     def __init__(self,
                  state_id: str,
                  prev_state_id: str = "",
-                 instruction: str = "",
+                 instruction: bytes = b"",
                  instruction_address: int = -1,
                  execution_count: int = -1) -> None:
         super().__init__(state_id,
@@ -875,7 +875,7 @@ class LightPatchEmuState(EmuState):
     def __init__(self,
                  state_id: str,
                  prev_state_id: str = "",
-                 instruction: str = "",
+                 instruction: bytes = b"",
                  instruction_address: int = -1,
                  execution_count: int = -1) -> None:
         super().__init__(state_id,
@@ -1018,7 +1018,7 @@ class EmuStateManager():
 
     def _create_full_state(self,
                            new_state_id: str,
-                           instruction: str,
+                           instruction: bytes,
                            instruction_address:int,
                            current_registers_map: Dict[str, int],
                            memory_patches: List[Tuple[int, int, bytes]],
@@ -1041,7 +1041,7 @@ class EmuStateManager():
 
     def _create_heavy_patch_state(self,
                                   new_state_id: str,
-                                  instruction: str,
+                                  instruction: bytes,
                                   instruction_address:int,
                                   current_registers_map: Dict[str, int],
                                   memory_patches: List[Tuple[int, int, bytes]],
@@ -1075,7 +1075,7 @@ class EmuStateManager():
 
     def _create_light_patch_state(self,
                                   new_state_id: str,
-                                  instruction: str,
+                                  instruction: bytes,
                                   instruction_address:int,
                                   current_registers_map: Dict[str, int],
                                   memory_patches: List[Tuple[int, int, bytes]]) -> None:
@@ -1114,8 +1114,13 @@ class EmuStateManager():
         return self.states_dict.get(state_id, None)
 
 
-    def get_state_list_with_insn(self) -> List[Tuple[str, int, str, int]]:
-        result: List[Tuple[str, int, str, int]] = []
+    def get_state_list(self) -> List[Tuple[str, int, bytes, int]]:
+        """
+        Get a list of all EmuState objects with their ID, instruction address, instruction, and execution count.
+
+        :return: A list of tuples containing the state ID, instruction address, instruction, and execution count.
+        """
+        result: List[Tuple[str, int, bytes, int]] = []
         for state_id, state in self.states_dict.items():
             result.append((state_id, state.instruction_address, state.instruction, state.execution_count))
         return result
@@ -1137,7 +1142,7 @@ class EmuStateManager():
 
     def create_state(self,
                      uc,
-                     instruction: str,
+                     instruction: bytes,
                      instruction_address: int,
                      memory_regions: Iterator[Tuple[int, int, int]],
                      memory_patches: List[Tuple[int, int, bytes]]) -> None:
@@ -1344,7 +1349,7 @@ class EmuTracer():
     """
     @dataclass
     class state_buffer_t(object):
-        instruction: str
+        instruction: bytes
         memory_patches: List[Tuple[int, int, bytes]]
 
     def __init__(self, executer:EmuExecuter, state_manager:EmuStateManager) -> None:
@@ -1355,7 +1360,7 @@ class EmuTracer():
         self.capstone_arch, self.capstone_mode= CAPSTONE_ARCH_MAP[self.arch]
         self.md = Cs(self.capstone_arch, self.capstone_mode)
 
-        self.state_buffer = self.state_buffer_t("", [])
+        self.state_buffer = self.state_buffer_t(b"", [])
 
         self._init_hook()
 
@@ -1393,8 +1398,8 @@ class EmuTracer():
     def cb_catch_insn_execution(self, uc, address, size, user_data) -> bool:
         tte_log_dbg(message=f"Tracing instruction at 0x{address:X}, instruction size = {size:X}")
         _, _, opcode, operand = next(self.md.disasm_lite(uc.mem_read(address, size), 0))
-        self.state_buffer.instruction = opcode + "\t" + operand
         tte_log_dbg("Executing instruction:    %s\t%s" % (opcode, operand))
+        self.state_buffer.instruction = bytes(uc.mem_read(address, size))
         return True
 
 
@@ -1434,7 +1439,7 @@ class EmuTracer():
     def cb_create_emu_end_state(self, uc):
         insn_pointer = uc.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch])
         self.state_manager.create_state(uc,
-                                        "",
+                                        b"",
                                         insn_pointer,
                                         self.executer.get_mem_regions(),
                                         self.state_buffer.memory_patches)
