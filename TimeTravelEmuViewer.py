@@ -41,7 +41,7 @@ NEXT_STATE_ACTION_SHORTCUT = "F3"
 PREV_STATE_ACTION_SHORTCUT = "F2"
 
 
-CHAMGE_HIGHLIGHT_COLOR   = 0xFFD073
+CHANGE_HIGHLIGHT_COLOR   = 0xFFD073
 
 
 
@@ -295,6 +295,25 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 line_info.bgcolor = bgcolor
 
                 return super().EditLine(lineno_to_edit, line, fgcolor, bgcolor) # Call base EditLine
+            return False
+        return False
+
+    def EditLineColor(self, address, address_idx, fgcolor=None, bgcolor=None):
+        """
+        Edits an existing line's color identified by its binary address.
+
+        :return: Boolean indicating success.
+        """
+        self.CheckRebuild()
+        target_line_info = address_line_info(address=address, address_idx=address_idx)
+        lineno_to_edit = self._lines_data.bisect_left(target_line_info)
+        if lineno_to_edit < len(self._lines_data):
+            line_info: address_line_info = self._lines_data[lineno_to_edit] # type: ignore
+            if line_info.address == address and \
+            line_info.address_idx == address_idx:
+                line_info.fgcolor = fgcolor
+                line_info.bgcolor = bgcolor
+                return super().EditLine(lineno_to_edit, line_info.value, fgcolor, bgcolor) # Call base EditLine
             return False
         return False
 
@@ -600,6 +619,9 @@ class TTE_DisassemblyViewer():
         self.current_range_display_end: int = -1;
 
 
+        self.change_hightlight_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, lineno, color),...]
+
+
 
     def InitViewer(self):
         self.viewer.Create(self.title)
@@ -691,6 +713,17 @@ class TTE_DisassemblyViewer():
         self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state_id} ]")
 
 
+    def HighlightLines(self):
+        for address, lineno, color in self.change_hightlight_lines:
+            self.viewer.EditLineColor(address, lineno, 0, color)
+
+
+    def ClearHighlightLines(self):
+        while len(self.change_hightlight_lines) > 0:
+            address, lineno, color = self.change_hightlight_lines.pop()
+            self.viewer.EditLineColor(address, lineno, None)
+
+
     def ApplyStateMemoryPatchesInViewer(self, mem_diff: Optional[List[Tuple[int, bytes]]], page_diff):
         assert self.memory_pages_list, "State data not loaded"
         if page_diff:
@@ -706,6 +739,8 @@ class TTE_DisassemblyViewer():
                     else:
                         line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1)
                         self.viewer.UpdateLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
+                self.change_hightlight_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
+        self.HighlightLines()
         self.viewer.Refresh()
 
     def DisplayMemoryPages(self, range_start, range_end):
@@ -781,8 +816,8 @@ class TTE_DisassemblyViewer():
         self.current_range_display_end = range_end
         self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
 
-
-
+        self.HighlightLines()
+        self.viewer.Refresh()
 
 
 
@@ -852,13 +887,13 @@ class TTE_RegistersViewer:
         assert self.regs_values is not None, "No state data loaded"
 
         self.viewer.ClearLines()
-        changed_fgcolor = CHAMGE_HIGHLIGHT_COLOR
+        changed_bgcolor = CHANGE_HIGHLIGHT_COLOR
         for reg_name, reg_value in self.regs_values.items():
 
             line_bgcolor = None
 
             if self.regs_diff is not None and reg_name in self.regs_diff:
-                line_bgcolor = changed_fgcolor
+                line_bgcolor = changed_bgcolor
 
             line_text = ColorfulLineGenerator.GenerateRegisterLine(reg_name, reg_value, self.hex_len)
             self.viewer.AddLine(line_text, bgcolor=line_bgcolor)
@@ -1037,18 +1072,12 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             regs_diff, mem_diff = self._GetPreStateDiff(state_id)
 
 
-
-
-
+        self.disassembly_viewer.ClearHighlightLines()
         self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
         self.disassembly_viewer.ApplyStateMemoryPatchesInViewer(mem_diff, page_diff)
 
-
         if self.follow_current_instruction or self.current_state_id is None:
             self.disassembly_viewer.JumpTo(target_state.instruction_address)
-
-
-
 
         self.registers_viewer.SetRegisters(target_full_state.state_id, target_full_state.registers_map)
         self.registers_viewer.SetRegsDiff(target_full_state.state_id, regs_diff)
