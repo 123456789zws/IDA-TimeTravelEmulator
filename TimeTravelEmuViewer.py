@@ -661,36 +661,21 @@ class TTE_DisassemblyViewer():
         self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state_id} ]")
 
 
-    # def ApplyStateMemoryPatchesInViewer(self, mem_diff, page_diff):
-    #     assert self.memory_pages_list, "State data not loaded"
-    #     print(self.memory_pages_list)
-
-    #     for start_addr, (perm, data) in page_diff.items():
-
+    def ApplyStateMemoryPatchesInViewer(self, mem_diff: Optional[List[Tuple[int, bytes]]], page_diff):
+        assert self.memory_pages_list, "State data not loaded"
 
 
 
     def DisplayMemoryPages(self, range_start, range_end):
         assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
-
-        self.viewer.ClearLines()
-        self.current_range_display_start = range_start
-        self.current_range_display_end = range_end
-        self.AddLineInRange(range_start, range_end)
-
-        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
-
-
-
-
-    def AddLineInRange(self, range_start, range_end):
         assert self.memory_pages_list and self.execution_counts, "State data not loaded"
 
+        self.viewer.ClearLines()
         current_addr = range_start
         for start_addr, (perm, data) in self.memory_pages_list:
             assert len(data) == PAGE_SIZE
 
-            if start_addr + PAGE_SIZE > range_end or start_addr + PAGE_SIZE <= range_start:
+            if start_addr > range_end or start_addr + PAGE_SIZE <= range_start:
                 continue
 
             # Process empty addresses that may exist before the current page
@@ -700,7 +685,7 @@ class TTE_DisassemblyViewer():
                 self.viewer.AddLine(current_addr, UNKNOW_LINE, line_text)
                 current_addr += 1
 
-            while current_addr < start_addr + PAGE_SIZE:
+            while current_addr < start_addr + PAGE_SIZE and current_addr < range_end:
                 count = 0
                 if current_addr in self.execution_counts:
                     count = self.execution_counts[current_addr]
@@ -747,7 +732,9 @@ class TTE_DisassemblyViewer():
                 self.viewer.AddLine(current_addr, UNKNOW_LINE, line_text)
                 current_addr += 1
 
-
+        self.current_range_display_start = range_start
+        self.current_range_display_end = range_end
+        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
 
 
 
@@ -810,9 +797,10 @@ class TTE_RegistersViewer:
         self._RefreshStatusBar(state_id)
 
 
-    def SetRegsDiff(self, state_id: str, regs_diff: Optional[List[str]]):
+    def SetRegsDiff(self, state_id: str, regs_diff: Optional[Dict[str, int]]):
         assert state_id == self.current_state_id
-        self.regs_diff = regs_diff
+        if regs_diff is not None:
+            self.regs_diff = list(regs_diff.keys())
 
 
     def DisplayRegisters(self):
@@ -886,7 +874,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.current_full_state: Optional[FullEmuState] = None # Only SwitchStateDisplay() can change this value.
 
         # configs
-        self.follow_current_instruction = True # Whether to follow the current instruction when switching states.
+        self.follow_current_instruction = False # True # Whether to follow the current instruction when switching states.
 
 
 
@@ -967,7 +955,28 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
 
 
-    def SwitchStateDisplay(self, state_id: str):
+    def _GetPreStateDiff(self, state_id: str) -> Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]]]:
+        assert self.state_manager is not None, "No state_manager loaded"
+
+        regs_diff: Optional[Dict[str, int]] = None
+        mem_diff: Optional[List[Tuple[int, bytes]]] = None
+
+        entry = self.state_manager.get_state_change(state_id)
+        if not entry:
+            return regs_diff, mem_diff
+
+        regs_diff = entry[0]
+        mem_diff_from_entry = entry[1]
+
+        if mem_diff_from_entry:
+            mem_diff = []
+            for addr, data_len, data in mem_diff_from_entry:
+                for offset in range(data_len):
+                    mem_diff.append((addr + offset, data[offset:offset + 1]))
+        return regs_diff, mem_diff
+
+
+    def SwitchStateDisplay(self, state_id: str, show_pre_state_diff = True):
         assert self.state_manager is not None, "No state_manager loaded"
 
         target_state = self.state_manager.get_state(state_id)
@@ -976,30 +985,28 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
         assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
 
-        prev_regs_diff = None
-        prev_mem_diff = None
-        entry= self.state_manager.get_state_change(target_full_state.state_id)
-        if entry:
-            prev_regs_diff, prev_mem_diff = entry
-            prev_regs_diff = list(prev_regs_diff)
-            prev_mem_diff = prev_mem_diff
-
-
+        regs_diff: Optional[Dict[str, int]] = None
+        mem_diff: Optional[List[Tuple[int, bytes]]] = None
+        page_diff = None
+        if show_pre_state_diff:
+            regs_diff, mem_diff = self._GetPreStateDiff(state_id)
 
 
 
 
 
         self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
+        # self.disassembly_viewer.ApplyStateMemoryPatchesInViewer(mem_diff, page_diff)
 
-        if self.follow_current_instruction:
+
+        if self.follow_current_instruction or self.current_state_id is None:
             self.disassembly_viewer.JumpTo(target_state.instruction_address)
 
 
 
 
         self.registers_viewer.SetRegisters(target_full_state.state_id, target_full_state.registers_map)
-        self.registers_viewer.SetRegsDiff(target_full_state.state_id, prev_regs_diff)
+        self.registers_viewer.SetRegsDiff(target_full_state.state_id, regs_diff)
         self.registers_viewer.DisplayRegisters()
 
         self.current_full_state = target_full_state
