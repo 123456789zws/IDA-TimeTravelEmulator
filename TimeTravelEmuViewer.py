@@ -45,7 +45,47 @@ CHAMGE_HIGHLIGHT_COLOR   = 0xFFD073
 
 
 
+class MenuActionHandler(ida_kernwin.action_handler_t):
+    def __init__(self,
+                 parent_title,
+                 checkable,
+                 action_name,
+                 handler,
+                 title,
+                 shortcut):
+        ida_kernwin.action_handler_t.__init__(self)
+        self.parent_title = parent_title
+        self.checkable: Optional[Callable[[], Optional[bool]]] = checkable
+        self.action_name = action_name
+        self.handler = handler
+        self.title = title
+        self.shortcut = shortcut
+        self.register()
 
+    def activate(self, ctx):
+        return self.handler()
+
+    def update(self, ctx):
+        if ctx.widget_title == self.parent_title and self.checkable and self.checkable():
+            return idaapi.AST_ENABLE
+        return idaapi.AST_DISABLE
+
+    def register(self):
+        actname = self.action_name
+        if ida_kernwin.unregister_action(actname):
+            tte_log_dbg("Unregistered previously-registered action \"%s\"" % actname)
+
+        desc = ida_kernwin.action_desc_t(actname, self.title , self, self.shortcut)
+        if ida_kernwin.register_action(desc):
+            tte_log_dbg("Registered action \"%s\"" % actname)
+
+    def unregister(self):
+        actname = self.action_name
+        if ida_kernwin.unregister_action(actname):
+            tte_log_dbg("Unregistered action \"%s\"" % actname)
+
+    def get_action_name(self) -> str:
+        return self.action_name
 
 
 # Line types
@@ -78,6 +118,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
 
         self.need_rebuild = False # Flag to indicate if the viewer needs to be refreshed
         self.keydown_callback_list: List[Tuple[int, bool, Callable]] = [] # List[(ord_key, is_shift, callback_func)], Callback functions list called when corresponding keys is down
+        self.menu_action_handlers = []
 
 
     def _get_lineno_left_from_address(self, address):
@@ -134,9 +175,11 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
     def Create(self, title):
         return super().Create(title)
 
-    def Close(self):
-        self.CheckRebuild()
-        return super().Close()
+
+    def OnClose(self):
+        for action_handler in self.menu_action_handlers:
+            action_handler.unregister()
+
 
     def Show(self):
         self.CheckRebuild()
@@ -422,7 +465,12 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         self.keydown_callback_list.append((target_vkey, need_shift, callback))
 
 
+    def AddAction(self, action_handler: MenuActionHandler):
+        action_handler.register()
+        actname = action_handler.get_action_name()
+        ida_kernwin.attach_action_to_popup(self.GetWidget(), None, actname)
 
+        self.menu_action_handlers.append(action_handler)
 
 
 
@@ -442,7 +490,15 @@ class ColorfulLineGenerator():
     @staticmethod
     def GenerateDisassemblyDataLine(address, address_len, value, value_len) -> str:
         addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
-        colored_value = ida_lines.COLSTR(f"0x{value:0{value_len}X}", ida_lines.SCOLOR_NUMBER)
+        if len(value) <= 8:
+            data_hex_parts = [f"{byte:02x}" for byte in value]
+            full_str = ' '.join(data_hex_parts)
+            data_str =  full_str
+        else:
+            prefix = ' '.join(f"{byte:02x}" for byte in value[:3])
+            suffix = ' '.join(f"{byte:02x}" for byte in value[-3:])
+            data_str =  f"{prefix} ... {suffix}"
+        colored_value = ida_lines.COLSTR(data_str, ida_lines.SCOLOR_BINPREF)
         return f"     {addr_str}  {colored_value}"
 
     @staticmethod
@@ -489,6 +545,7 @@ class TTE_DisassemblyViewer():
     5. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
+    title = "TimeTravelEmuDisassembly"
 
     def __init__(self):
         self.viewer = AddressAwareCustomViewer()
@@ -497,6 +554,12 @@ class TTE_DisassemblyViewer():
             self.addr_len = self.bitness // 4
         else:
             tte_log_err("Failed to get bitness")
+
+        self.statusbar_state_id_qlabel: Optional[QtWidgets.QLabel] = None
+        self.statusbar_memory_range_qlabel: Optional[QtWidgets.QLabel] = None
+
+
+
 
         self.memory_pages_list = None
         self.execution_counts = None
@@ -507,36 +570,62 @@ class TTE_DisassemblyViewer():
 
 
     def InitViewer(self):
-        self.viewer.Create("TimeTravelEmuDisassembly")
+        self.viewer.Create(self.title)
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self._SetCustomViewerStatusBar()
 
-        self.viewer.AddKeyDownCallback(ord("G"), False, self.cb_InputJump)
+        self.AddMenuActions()
 
 
-    def cb_InputJump(self, viewer: AddressAwareCustomViewer):
+    def AddMenuActions(self):
+        self.viewer.AddAction(MenuActionHandler(self.title,
+                                lambda : True,
+                                f"{self.title}:JumpAction",
+                                self.InputJumpAction,
+                                "Jump to address",
+                                "G"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def JumpTo(self, address):
         assert self.memory_pages_list, "State data not loaded"
 
-        n = viewer.GetLineNo()
+        if self.current_range_display_start < address and self.current_range_display_end > address:
+            self.viewer.Jump(address, 5, 0)
+
+        else:
+            # page undisplay
+            starts = [entry[0] for entry in self.memory_pages_list]
+            idx = bisect.bisect_right(starts, address) - 1
+
+            if idx >= 0 and 0 <= address - starts[idx] < PAGE_SIZE:
+                self.DisplayMemoryPages(starts[idx], starts[idx]+ PAGE_SIZE)
+                self.viewer.Jump(address, 5, 0)
+            else:
+                idaapi.warning("Target address not loaded")
+
+
+    def InputJumpAction(self):
+        n = self.viewer.GetLineNo()
         if n is not None:
-            target_addr = ida_kernwin.ask_addr(viewer.GetLineNo(), "Where to go?")
+            target_addr = ida_kernwin.ask_addr(self.viewer.GetLineNo(), "Jump to address")
             if target_addr:
-                if self.current_range_display_start < target_addr and self.current_range_display_end > target_addr:
-                    viewer.Jump(target_addr, 5, 0)
-
-                else:
-                    # page undisplay
-                    starts = [entry[0] for entry in self.memory_pages_list]
-                    idx = bisect.bisect_right(starts, target_addr) - 1
-
-                    if idx >= 0 and 0 <= target_addr - starts[idx] < PAGE_SIZE:
-                        self.DisplayMemoryPages(starts[idx], starts[idx]+ PAGE_SIZE)
-                        viewer.Jump(target_addr, 5, 0)
-                    else:
-                        idaapi.warning("Target address not loaded")
+                self.JumpTo(target_addr)
         return None
-
-
 
 
 
@@ -549,28 +638,29 @@ class TTE_DisassemblyViewer():
         for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
             viewer_status_bar.removeWidget(widget)
 
-        # Add custom status bar
-        viewer_status_bar.addWidget(QtWidgets.QLabel(" [ Flags Status: "))
+        self.statusbar_state_id_qlabel = QtWidgets.QLabel("[Status: N\\A ]")
+        viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
+        self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Memory Range: N\\A )")
+        viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
 
-        flags_refresh_button = QtWidgets.QPushButton("Refresh")
-        flags_refresh_button.clicked.connect(lambda: ida_kernwin.msg("Flags refreshed!\n"))
-        viewer_status_bar.addWidget(flags_refresh_button)
-        viewer_status_bar.addWidget(QtWidgets.QLabel(" ] "))
-
-        viewer_status_bar.addPermanentWidget(QtWidgets.QLabel("Flags: OK "))
+        viewer_status_bar.addPermanentWidget(QtWidgets.QLabel("Model: normal"))
 
 
     def LoadListFromESM(self, state_list: List[Tuple[str, int, bytes, int]]):
         self.execution_counts= {item[1]: item[3] for item in state_list}
 
 
-    def LoadStateMemory(self, memory_pages: Dict[int, Tuple[int, bytearray]]):
+    def LoadStateMemory(self, state_id: str, memory_pages: Dict[int, Tuple[int, bytearray]]):
+        assert self.statusbar_state_id_qlabel, "Status bar not initialized"
+
         self.memory_pages_list = sorted(memory_pages.items())
-        print(self.memory_pages_list)
+        self.statusbar_state_id_qlabel.setText(f"[State: {state_id} ]")
 
 
     def DisplayMemoryPages(self, range_start, range_end):
+        assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
         assert self.memory_pages_list and self.execution_counts, "State data not loaded"
+
         self.current_range_display_start = range_start
         self.current_range_display_end = range_end
         self.viewer.ClearLines()
@@ -617,13 +707,14 @@ class TTE_DisassemblyViewer():
 
                 elif idc.is_data(current_addr_flag):
                     data_size = idc.get_item_size(current_addr)
-                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr], data_size)
+                    offset = current_addr - start_addr
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[offset : offset + data_size], data_size)
                     self.viewer.AddLine(current_addr, CODE_LINE, line_text)
 
                     current_addr += data_size
                     continue
                 else:
-                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr], 1)
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr : current_addr - start_addr + 1], 1)
                     self.viewer.AddLine(current_addr, CODE_LINE, line_text)
 
                     current_addr += 1
@@ -636,7 +727,7 @@ class TTE_DisassemblyViewer():
                 current_addr += 1
 
 
-
+        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
 
 
 
@@ -729,10 +820,6 @@ class TTE_MemoryViewer:
 
 
 
-
-
-
-
 # from TimeTravelEmulator import EmuStateManager
 
 
@@ -770,6 +857,11 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.parent = self.FormToPyQtWidget(form)
 
         self.PopulateForm()
+
+
+
+
+
 
     def LoadESM(self, state_manager: EmuStateManager):
         """
@@ -825,10 +917,10 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
         assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
 
-        self.disassembly_viewer.LoadStateMemory(target_full_state.memory_pages)
+        self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
+        self.disassembly_viewer.JumpTo(target_state.instruction_address)
 
 
-        self.disassembly_viewer.DisplayMemoryPages(0x140001000, 0x140003000, )
 
 
 
@@ -842,7 +934,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             regs_diff = list(regs_diff)
 
         self.registers_viewer.LoadRegisters(target_full_state.state_id, target_full_state.registers_map, regs_diff)
-
 
 
 
