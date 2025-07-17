@@ -24,7 +24,7 @@ from re import split
 
 import bsdiff4
 from sortedcontainers import SortedList
-from sympy import false
+from sympy import N, false
 from unicorn import *
 from unicorn.x86_const import *
 from capstone import *
@@ -632,6 +632,9 @@ class TTE_DisassemblyViewer():
 
     def _SetMenuActions(self):
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
+                              f"{self.title}:RefreshAction",
+                              self.RefreshAction, "Refresh", ""))
+        self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:JumpAction",
                               self.InputJumpAction, "Jump to address", "G"))
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
@@ -649,14 +652,6 @@ class TTE_DisassemblyViewer():
         self.viewer.ClearLines()
         self.current_range_display_start = -1;
         self.current_range_display_end = -1;
-
-
-
-
-
-
-
-
 
 
     def JumpTo(self, address):
@@ -677,6 +672,10 @@ class TTE_DisassemblyViewer():
                 if idaapi.ask_yn(1, "Target address not loaded, Continue?") == 1:
                     self.DisplayMemoryRange(address, address+ PAGE_SIZE)
                     self.viewer.Jump(address, 5, 0)
+
+
+    def RefreshAction(self):
+        self.DisplayMemoryRange(self.current_range_display_start, self.current_range_display_end)
 
 
     def InputJumpAction(self):
@@ -1109,9 +1108,16 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         regs_diff: Optional[Dict[str, int]] = None
         mem_diff: Optional[List[Tuple[int, bytes]]] = None
         page_diff = None
-        if show_pre_state_diff:
-            regs_diff, mem_diff = self._GetPreStateDiff(state_id)
 
+        # if target_state.prev_state_id == self.current_state_id:
+        #     regs_diff, mem_diff = self._GetPreStateDiff(state_id)
+        # elif self.current_full_state is not None:
+        if self.current_full_state is not None:
+            entry = self.state_manager.compare_states(self.current_full_state, target_full_state)
+            if entry:
+                regs_diff = entry[0]
+                mem_diff = [(addr, data.to_bytes(1, byteorder='big' if get_is_be() else 'little')) for addr, (_, data) in entry[1].items()]
+                page_diff = entry[2]
 
         self.disassembly_viewer.ClearHighlightLines()
         self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)

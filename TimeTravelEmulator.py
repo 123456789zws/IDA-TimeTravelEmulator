@@ -1299,7 +1299,7 @@ class EmuStateManager():
             tte_log_warn(f"Could not generate full state for '{state2.state_id}'. Comparison aborted.")
             return
 
-        regs_diff = catch_dict_diff(full_state1.registers_map, full_state2.registers_map)
+        regs_diff: Dict[str, int] = catch_dict_diff(full_state1.registers_map, full_state2.registers_map)
         if not regs_diff:
             tte_log_dbg("No register differences found.")
         else:
