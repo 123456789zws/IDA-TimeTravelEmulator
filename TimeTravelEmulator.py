@@ -1,3 +1,4 @@
+from traitlets import Instance
 import idaapi
 import ida_lines
 import ida_ida
@@ -140,7 +141,7 @@ def get_bitness() -> Union[None, Literal[64], Literal[32]]:
         elif ida_ida.inf_is_32bit_exactly():
             return 32
     else:
-        info = idaapi.get_inf_structure()
+        info = idaapi.get_inf_structure() # TODO: Adapt IDA9: ida_ida.inf_is_64bit():
         if info.is_64bit():
             return 64
         elif info.is_32bit():
@@ -400,7 +401,7 @@ def tte_log_err(message):
 
 @dataclass
 class EmuSettings():
-    start = 0x140001450#0x07FF7733B1450#start#
+    start = 0x7FF7C6491450#start#0x140001450#
     end = -1#0x14000201C#end#
     # emulate_step_limit = 10
     is_load_registers = False
@@ -1114,15 +1115,15 @@ class EmuStateManager():
         return self.states_dict.get(state_id, None)
 
 
-    def get_state_list(self) -> List[Tuple[str, int, bytes, int]]:
+    def get_state_list(self) -> List[Tuple[str, EmuState]]:
         """
         Get a list of all EmuState objects with their ID, instruction address, instruction, and execution count.
 
         :return: A list of tuples containing the state ID, instruction address, instruction, and execution count.
         """
-        result: List[Tuple[str, int, bytes, int]] = []
+        result: List[Tuple[str, EmuState]] = []
         for state_id, state in self.states_dict.items():
-            result.append((state_id, state.instruction_address, state.instruction, state.execution_count))
+            result.append((state_id, state))
         return result
 
     def _determine_next_state_type(self):
@@ -1230,9 +1231,46 @@ class EmuStateManager():
     #         # print(self.get_state(st1.prev_state_id).generate_full_state(self.states_dict).__dict__)  #   type: ignore
 
 
+    def _get_regs_map(self, state) -> Dict[str, int]:
+        if state.type in [EmuState.STATE_TYPE_LIGHT_PATCH, EmuState.STATE_TYPE_HEAVY_PATCH]:
+            base_state = self.get_state(state.base_full_state_id)
+            assert base_state, f"Base state not found"
+            assert isinstance(base_state, FullEmuState)
+            return apply_dict_patch(base_state.registers_map, state.reg_patches)
+        else:
+            assert isinstance(state, FullEmuState)
+            return state.registers_map
 
 
-    def compare_states(self, state1_id: str, state2_id: str):
+    def get_state_change(self, target_state_id: str):
+        """
+        Get the memory and registers changes of a certain state compared to the previous state
+        As a light function, It only return the modified part between the current state and the previous state.
+        It does not compare the full state.
+
+        :param target_state_id: The ID of the target state.
+        :return: A tuple (regs_diff, mem_diff) representing the differences.
+                 regs_diff: Dict of changed registers in target_state relative to previous state.
+                 mem_diff: List of memory different from previous state to target_state.
+        """
+        target_state = self.get_state(target_state_id)
+        if not target_state:
+            tte_log_dbg(f"State not found")
+            return
+
+        prev_state = self.get_state(target_state.prev_state_id)
+        if not prev_state:
+            tte_log_dbg(f"prev state not found")
+            return
+
+        regs_diff = catch_dict_diff(self._get_regs_map(prev_state), self._get_regs_map(target_state))
+        mem_diff = target_state.memory_patches
+
+        return regs_diff, mem_diff
+
+
+
+    def compare_states(self, state1: EmuState, state2: EmuState):
         """
         Compares any two EmuState objects (full or patch) and returns their differences.
         The first state must be the base state, and the second state is the target state.
@@ -1243,17 +1281,11 @@ class EmuStateManager():
         :return: A tuple (regs_diff, mem_diff, pages_diff) representing the differences.
                  regs_diff: Dict of changed registers in state2 relative to state1.
                  mem_diff: List of memory different from state1 to state2.
-                 pages_diff: List of page different from state1 to state2.
+                 pages_diff: List of page different from state1 to state2, and the type of the page (1: added, 2: removed)
         """
-        tte_log_dbg(f"\n--- Comparing states Fully: {state1_id} vs {state2_id} ---")
+        tte_log_dbg(f"\n--- Comparing states Fully: {state1.state_id} vs {state2.state_id} ---")
 
-        state1 = self.get_state(state1_id)
-        state2 = self.get_state(state2_id)
-
-        assert state1, "State 1 not found: {}".format(state1_id)
-        assert state2, "State 2 not found: {}".format(state2_id)
-
-        tte_log_dbg(f"Comparison between State '{state1_id}' (Type: {state1.type}) and State '{state2_id}' (Type: {state2.type}):")
+        tte_log_dbg(f"Comparison between State '{state1.state_id}' (Type: {state1.type}) and State '{state2.state_id}' (Type: {state2.type}):")
         tte_log_dbg(f"Instruction Address: 0x{state1.instruction_address:X} -> 0x{state2.instruction_address:X}")
         tte_log_dbg(f"Execution Count: {state1.execution_count} -> {state2.execution_count}")
 
@@ -1261,10 +1293,10 @@ class EmuStateManager():
         full_state2 = state2.generate_full_state(self.states_dict)
 
         if not full_state1:
-            tte_log_warn(f"Could not generate full state for '{state1_id}'. Comparison aborted.")
+            tte_log_warn(f"Could not generate full state for '{state1.state_id}'. Comparison aborted.")
             return
         if not full_state2:
-            tte_log_warn(f"Could not generate full state for '{state2_id}'. Comparison aborted.")
+            tte_log_warn(f"Could not generate full state for '{state2.state_id}'. Comparison aborted.")
             return
 
         regs_diff = catch_dict_diff(full_state1.registers_map, full_state2.registers_map)
@@ -1291,51 +1323,14 @@ class EmuStateManager():
             )
 
         pages_diff = SortedDict()
-
         diff_keys_in_state1 = set(full_state1.memory_pages.keys()) - set(full_state2.memory_pages.keys())
         diff_keys_in_state2 = set(full_state2.memory_pages.keys()) - set(full_state1.memory_pages.keys())
-
-        # for key in diff_keys_in_state1:
-        #     pages_diff[key] = (1, full_state1.memory_pages[key])
-        # for key in diff_keys_in_state2:
-        #     pages_diff[key] = (2, full_state2.memory_pages[key])
+        for key in diff_keys_in_state1:
+            pages_diff[key] = (1, full_state1.memory_pages[key])
         for key in diff_keys_in_state2:
-            pages_diff[key] = full_state2.memory_pages[key]
+            pages_diff[key] = (2, full_state2.memory_pages[key])
+
         return regs_diff, mem_diff, pages_diff
-
-
-
-
-    def get_regs_map(self, state) -> Dict[str, int]:
-        if state.type in [EmuState.STATE_TYPE_LIGHT_PATCH, EmuState.STATE_TYPE_HEAVY_PATCH]:
-            base_state = self.get_state(state.base_full_state_id)
-            assert base_state, f"Base state not found"
-            assert isinstance(base_state, FullEmuState)
-            return apply_dict_patch(base_state.registers_map, state.reg_patches)
-        else:
-            assert isinstance(state, FullEmuState)
-            return state.registers_map
-
-
-    def get_state_change(self, target_state_id: str):
-        """
-        Get the memory and register changes of a certain state compared to the previous state
-        """
-        target_state = self.get_state(target_state_id)
-        if not target_state:
-            tte_log_dbg(f"State not found")
-            return
-
-        prev_state = self.get_state(target_state.prev_state_id)
-        if not prev_state:
-            tte_log_dbg(f"prev state not found")
-            return
-
-        regs_diff = catch_dict_diff(self.get_regs_map(prev_state), self.get_regs_map(target_state))
-        mem_diff = target_state.memory_patches
-
-        return regs_diff, mem_diff
-
 
 
 

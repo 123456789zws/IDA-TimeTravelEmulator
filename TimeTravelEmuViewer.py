@@ -2,6 +2,7 @@ import bisect
 import re
 
 from exceptiongroup import catch
+from TimeTravelEmulator import EmuState
 import idaapi
 import ida_lines
 import ida_ida
@@ -36,7 +37,8 @@ from TimeTravelEmulator import *
 
 PAGE_SIZE = 0x1000
 
-
+NEXT_STATE_ACTION_SHORTCUT = "F3"
+PREV_STATE_ACTION_SHORTCUT = "F2"
 
 
 CHAMGE_HIGHLIGHT_COLOR   = 0xFFD073
@@ -558,11 +560,11 @@ class TTE_DisassemblyViewer():
         self.statusbar_state_id_qlabel: Optional[QtWidgets.QLabel] = None
         self.statusbar_memory_range_qlabel: Optional[QtWidgets.QLabel] = None
 
-
-
-
-        self.memory_pages_list = None
         self.execution_counts = None
+
+
+        self.current_state_id = None
+        self.memory_pages_list = None
 
         self.current_range_display_start: int = -1;
         self.current_range_display_end: int = -1;
@@ -573,24 +575,25 @@ class TTE_DisassemblyViewer():
         self.viewer.Create(self.title)
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self._SetCustomViewerStatusBar()
+        self._SetMenuActions()
 
-        self.AddMenuActions()
 
-
-    def AddMenuActions(self):
-        self.viewer.AddAction(MenuActionHandler(self.title,
-                                lambda : True,
-                                f"{self.title}:JumpAction",
-                                self.InputJumpAction,
-                                "Jump to address",
-                                "G"))
+    def _SetMenuActions(self):
+        self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
+                              f"{self.title}:JumpAction",
+                              self.InputJumpAction, "Jump to address", "G"))
 
 
 
+    def AddMenuActions(self, action_handler: MenuActionHandler):
+        action_handler.parent_title = self.title
+        self.viewer.AddAction(action_handler)
 
 
-
-
+    def ClearLines(self):
+        self.viewer.ClearLines()
+        self.current_range_display_start = -1;
+        self.current_range_display_end = -1;
 
 
 
@@ -646,15 +649,22 @@ class TTE_DisassemblyViewer():
         viewer_status_bar.addPermanentWidget(QtWidgets.QLabel("Model: normal"))
 
 
-    def LoadListFromESM(self, state_list: List[Tuple[str, int, bytes, int]]):
-        self.execution_counts= {item[1]: item[3] for item in state_list}
+    def LoadListFromESM(self, state_list: List[Tuple[str, EmuState]]):
+        self.execution_counts= {state.instruction_address: state.execution_count for _, state in state_list}
 
 
     def LoadStateMemory(self, state_id: str, memory_pages: Dict[int, Tuple[int, bytearray]]):
         assert self.statusbar_state_id_qlabel, "Status bar not initialized"
 
+        self.current_state_id = state_id
         self.memory_pages_list = sorted(memory_pages.items())
-        self.statusbar_state_id_qlabel.setText(f"[State: {state_id} ]")
+        self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state_id} ]")
+
+
+    def ApplyStateMemoryPatches(self, mem_diff):
+        pass
+
+
 
 
     def DisplayMemoryPages(self, range_start, range_end):
@@ -782,6 +792,7 @@ class TTE_RegistersViewer:
 
 
     def LoadRegisters(self, state_id: str, registers: Dict[str, int], regs_diff: Optional[List[str]]):
+        self.viewer.ClearLines()
         changed_fgcolor = CHAMGE_HIGHLIGHT_COLOR
         for reg_name, reg_value in registers.items():
 
@@ -835,6 +846,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
     """
 
+    title = "TimeTravelEmuViewer"
 
     def __init__(self):
         super().__init__()
@@ -844,6 +856,11 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.mempages_viewer: TTE_MemoryViewer = TTE_MemoryViewer()
 
         self.state_manager: Optional[EmuStateManager] = None
+        self.state_list: Optional[List[Tuple[str, EmuState]]] = None # List of (state_id, state) formed in order of generation
+
+        self.current_state_idx: int = 0
+        self.current_state_id: str = ""
+        self.current_full_state: Optional[FullEmuState] = None
 
 
 
@@ -851,6 +868,16 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.disassembly_viewer.InitViewer()
         self.registers_viewer.InitViewer()
         self.mempages_viewer.InitViewer()
+
+        self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.title}:NextStateAction",
+                              self.DisplayNextState, "Next state", NEXT_STATE_ACTION_SHORTCUT))
+
+        self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.title}:PrevStateAction",
+                              self.DisplayPrevState, "Previous state", PREV_STATE_ACTION_SHORTCUT))
+
+
 
 
     def OnCreate(self, form):
@@ -870,18 +897,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         """
         self.state_manager = state_manager
 
-
-        enter = next(reversed(state_manager.states_dict.items()))
-        if not enter:
-            raise ValueError("No state found in state_manager")
-        last_key, last_state  = enter
-
         self.state_list = self.state_manager.get_state_list()
 
         self.disassembly_viewer.LoadListFromESM(self.state_list);
 
-
-        self.SwitchStateDisplay(last_key)
+        self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
+        self.current_state_idx = 0
+        self.current_state_id  = self.state_list[self.current_state_idx][0]
 
 
     def PopulateForm(self):
@@ -905,7 +927,18 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         main_layout.setContentsMargins(0, 0, 0, 0)
 
 
+    def DisplayNextState(self):
+        assert self.state_list is not None, "No state_list loaded"
+        if self.current_state_idx < len(self.state_list) - 1:
+            self.current_state_idx += 1
+            self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
 
+
+    def DisplayPrevState(self):
+        assert self.state_list is not None, "No state_list loaded"
+        if self.current_state_idx > 0:
+            self.current_state_idx -= 1
+            self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
 
 
     def SwitchStateDisplay(self, state_id: str):
@@ -917,29 +950,32 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
         assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
 
-        self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
-        self.disassembly_viewer.JumpTo(target_state.instruction_address)
+
+        if self.current_state_id is None:
+            self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
+            self.disassembly_viewer.JumpTo(target_state.instruction_address)
+        else:
+            self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
+            self.disassembly_viewer.JumpTo(target_state.instruction_address)
 
 
 
 
 
-
-        regs_diff = None
-        mem_diff = None
+        prev_regs_diff = None
+        prev_mem_diff = None
         entry= self.state_manager.get_state_change(target_full_state.state_id)
 
         if entry:
-            regs_diff, mem_diff = entry
-            regs_diff = list(regs_diff)
+            prev_regs_diff, prev_mem_diff = entry
+            prev_regs_diff = list(prev_regs_diff)
 
-        self.registers_viewer.LoadRegisters(target_full_state.state_id, target_full_state.registers_map, regs_diff)
+        self.registers_viewer.LoadRegisters(target_full_state.state_id, target_full_state.registers_map, prev_regs_diff)
 
-
-
-
+        self.current_full_state = target_full_state
 
 
+        self.current_state_id = state_id
 
 
 
