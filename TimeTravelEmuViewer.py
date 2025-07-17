@@ -661,19 +661,30 @@ class TTE_DisassemblyViewer():
         self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state_id} ]")
 
 
-    def ApplyStateMemoryPatches(self, mem_diff):
-        pass
+    # def ApplyStateMemoryPatchesInViewer(self, mem_diff, page_diff):
+    #     assert self.memory_pages_list, "State data not loaded"
+    #     print(self.memory_pages_list)
+
+    #     for start_addr, (perm, data) in page_diff.items():
 
 
 
 
     def DisplayMemoryPages(self, range_start, range_end):
         assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
-        assert self.memory_pages_list and self.execution_counts, "State data not loaded"
 
+        self.viewer.ClearLines()
         self.current_range_display_start = range_start
         self.current_range_display_end = range_end
-        self.viewer.ClearLines()
+        self.AddLineInRange(range_start, range_end)
+
+        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
+
+
+
+
+    def AddLineInRange(self, range_start, range_end):
+        assert self.memory_pages_list and self.execution_counts, "State data not loaded"
 
         current_addr = range_start
         for start_addr, (perm, data) in self.memory_pages_list:
@@ -737,7 +748,6 @@ class TTE_DisassemblyViewer():
                 current_addr += 1
 
 
-        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
 
 
 
@@ -767,6 +777,12 @@ class TTE_RegistersViewer:
         else:
             tte_log_err("Failed to get bitness")
 
+        self.current_state_id: Optional[str] = None # Only SetRegisters() change this value.
+
+        self.regs_values: Optional[Dict[str, int]] = None # Only SetRegisters() change this value.
+        self.regs_diff: Optional[List[str]] = None # Only SetRegsDiff() change this value.
+
+
 
     def InitViewer(self):
         self.viewer.Create("TimeTravelEmuRegisters")
@@ -788,26 +804,33 @@ class TTE_RegistersViewer:
         self.statusbar_label.setText(f"State ID: {state_id}")
 
 
+    def SetRegisters(self, state_id: str, regs_values: Dict[str, int]):
+        self.current_state_id = state_id
+        self.regs_values = regs_values
+        self._RefreshStatusBar(state_id)
 
 
+    def SetRegsDiff(self, state_id: str, regs_diff: Optional[List[str]]):
+        assert state_id == self.current_state_id
+        self.regs_diff = regs_diff
 
-    def LoadRegisters(self, state_id: str, registers: Dict[str, int], regs_diff: Optional[List[str]]):
+
+    def DisplayRegisters(self):
+        assert self.regs_values is not None, "No state data loaded"
+
         self.viewer.ClearLines()
         changed_fgcolor = CHAMGE_HIGHLIGHT_COLOR
-        for reg_name, reg_value in registers.items():
+        for reg_name, reg_value in self.regs_values.items():
 
             line_bgcolor = None
 
-            if regs_diff is not None and reg_name in regs_diff:
+            if self.regs_diff is not None and reg_name in self.regs_diff:
                 line_bgcolor = changed_fgcolor
 
             line_text = ColorfulLineGenerator.GenerateRegisterLine(reg_name, reg_value, self.hex_len)
             self.viewer.AddLine(line_text, bgcolor=line_bgcolor)
 
         self.viewer.Refresh()
-
-        self._RefreshStatusBar(state_id)
-
 
 
 
@@ -858,9 +881,12 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.state_manager: Optional[EmuStateManager] = None
         self.state_list: Optional[List[Tuple[str, EmuState]]] = None # List of (state_id, state) formed in order of generation
 
-        self.current_state_idx: int = 0
-        self.current_state_id: str = ""
-        self.current_full_state: Optional[FullEmuState] = None
+        self.current_state_idx: int = 0 # Index of current state in state_list.
+        self.current_state_id: Optional[str] = None # Only SwitchStateDisplay() can change this value.
+        self.current_full_state: Optional[FullEmuState] = None # Only SwitchStateDisplay() can change this value.
+
+        # configs
+        self.follow_current_instruction = True # Whether to follow the current instruction when switching states.
 
 
 
@@ -901,9 +927,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.disassembly_viewer.LoadListFromESM(self.state_list);
 
-        self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
         self.current_state_idx = 0
-        self.current_state_id  = self.state_list[self.current_state_idx][0]
+        self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
+
 
 
     def PopulateForm(self):
@@ -950,33 +976,35 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
         assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
 
-
-        if self.current_state_id is None:
-            self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
-            self.disassembly_viewer.JumpTo(target_state.instruction_address)
-        else:
-            self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
-            self.disassembly_viewer.JumpTo(target_state.instruction_address)
-
-
-
-
-
         prev_regs_diff = None
         prev_mem_diff = None
         entry= self.state_manager.get_state_change(target_full_state.state_id)
-
         if entry:
             prev_regs_diff, prev_mem_diff = entry
             prev_regs_diff = list(prev_regs_diff)
+            prev_mem_diff = prev_mem_diff
 
-        self.registers_viewer.LoadRegisters(target_full_state.state_id, target_full_state.registers_map, prev_regs_diff)
+
+
+
+
+
+
+        self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
+
+        if self.follow_current_instruction:
+            self.disassembly_viewer.JumpTo(target_state.instruction_address)
+
+
+
+
+        self.registers_viewer.SetRegisters(target_full_state.state_id, target_full_state.registers_map)
+        self.registers_viewer.SetRegsDiff(target_full_state.state_id, prev_regs_diff)
+        self.registers_viewer.DisplayRegisters()
 
         self.current_full_state = target_full_state
-
-
         self.current_state_id = state_id
-
+        return
 
 
 
