@@ -592,7 +592,7 @@ class TTE_DisassemblyViewer():
     1. Use self.InitViewer() to initializate the viewer.
     2. Set data: including self.memory_pages_list and self.execution_counts
     3. Add self.viewer_widegt to TimeTravelEmuViewer's layout.
-    4. Use self.DisplayMemoryPages to display memory pages in range.
+    4. Use self.DisplayMemoryRange to display memory pages in range.
     5. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
@@ -634,6 +634,9 @@ class TTE_DisassemblyViewer():
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:JumpAction",
                               self.InputJumpAction, "Jump to address", "G"))
+        self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
+                              f"{self.title}:SetMemoryRangeAction",
+                              self.SetDisplayMemoryRangeAction, "Set memory range", "R"))
 
 
 
@@ -668,10 +671,12 @@ class TTE_DisassemblyViewer():
             idx = bisect.bisect_right(starts, address) - 1
 
             if idx >= 0 and 0 <= address - starts[idx] < PAGE_SIZE:
-                self.DisplayMemoryPages(starts[idx], starts[idx]+ PAGE_SIZE)
+                self.DisplayMemoryRange(starts[idx], starts[idx]+ PAGE_SIZE)
                 self.viewer.Jump(address, 5, 0)
             else:
-                idaapi.warning("Target address not loaded")
+                if idaapi.ask_yn(1, "Target address not loaded, Continue?") == 1:
+                    self.DisplayMemoryRange(address, address+ PAGE_SIZE)
+                    self.viewer.Jump(address, 5, 0)
 
 
     def InputJumpAction(self):
@@ -682,8 +687,44 @@ class TTE_DisassemblyViewer():
                 self.JumpTo(target_addr)
         return None
 
+    def SetDisplayMemoryRangeAction(self):
+        assert self.memory_pages_list, "State data not loaded"
 
+        class RangeInputForm(idaapi.Form):
+            def __init__(self, start_addr, end_addr):
+                self.start_addr = start_addr
+                self.end_addr = end_addr
 
+                self.RangeStart: Optional[ida_kernwin.Form.NumericInput]  = None
+                self.RangeEnd: Optional[ida_kernwin.Form.NumericInput] = None
+                super().__init__(
+                r'''
+                {FormChangeCb}
+                <Range Start: {RangeStart}> | <Range End: {RangeEnd}>
+                ''',
+                {
+                "FormChangeCb": self.FormChangeCb(self.OnFormChange),
+
+                "RangeStart": self.NumericInput(value = self.start_addr, swidth = 30),
+                "RangeEnd": self.NumericInput(value = self.end_addr, swidth = 30),
+                }
+                )
+                self.Compile()
+
+            def OnFormChange(self,fid):
+                assert self.RangeStart and self.RangeEnd
+                if fid == self.RangeStart.id or fid == self.RangeEnd.id:
+                    self.start_addr = self.GetControlValue(self.RangeStart)
+                    self.end_addr = self.GetControlValue(self.RangeEnd)
+                return 1
+
+        form = RangeInputForm(self.current_range_display_start,self.current_range_display_end)
+        IsSet = form.Execute()
+        if IsSet is not None:
+            range_start = form.start_addr
+            range_end = form.end_addr
+            self.DisplayMemoryRange(range_start, range_end)
+        form.Free()
 
 
 
@@ -743,7 +784,7 @@ class TTE_DisassemblyViewer():
         self.HighlightLines()
         self.viewer.Refresh()
 
-    def DisplayMemoryPages(self, range_start, range_end):
+    def DisplayMemoryRange(self, range_start, range_end):
         assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
         assert self.memory_pages_list and self.execution_counts, "State data not loaded"
 
@@ -806,11 +847,11 @@ class TTE_DisassemblyViewer():
                     current_addr += 1
                     continue
 
-            # After processing all memory pages, fill in the possible empty addresses.
-            while current_addr < range_end:
-                line_text = ColorfulLineGenerator.GenerateUnknownLine(current_addr, self.addr_len)
-                self.viewer.AddLine(current_addr, UNKNOW_LINE, line_text)
-                current_addr += 1
+        # After processing all memory pages, fill in the possible empty addresses.
+        while current_addr < range_end:
+            line_text = ColorfulLineGenerator.GenerateUnknownLine(current_addr, self.addr_len)
+            self.viewer.AddLine(current_addr, UNKNOW_LINE, line_text)
+            current_addr += 1
 
         self.current_range_display_start = range_start
         self.current_range_display_end = range_end
