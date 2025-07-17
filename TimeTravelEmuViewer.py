@@ -96,6 +96,8 @@ DATA_LINE = 1
 CODE_LINE = 2
 NAME_LINE = 3
 EMPTY_LINE = 4
+SINGLE_DATA_LINE = 5
+ERROR_LINE = 6
 
 @dataclass
 class address_line_info:
@@ -294,6 +296,28 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
 
                 return super().EditLine(lineno_to_edit, line, fgcolor, bgcolor) # Call base EditLine
             return False
+        return False
+
+
+    def UpdateLine(self, address, address_idx, address_type, line, fgcolor=None, bgcolor=None):
+        """
+        Updates an existing line identified by its binary address.
+        or inserts a new line if it does not exist.
+
+        :return: Boolean indicating success.
+        """
+        self.CheckRebuild()
+        target_line_info = address_line_info(address=address, address_idx=address_idx)
+        lineno_to_edit = self._lines_data.bisect_left(target_line_info)
+        if lineno_to_edit < len(self._lines_data):
+            line_info: address_line_info = self._lines_data[lineno_to_edit] # type: ignore
+
+            if line_info.address == address and \
+                line_info.address_idx == address_idx:
+                return self.EditLine(address, address_idx, address_type, line, fgcolor, bgcolor)
+            else:
+                self.DelLine(address, lazy=False)
+                return self.InsertLine(address, address_type, line, fgcolor, bgcolor)
         return False
 
 
@@ -533,6 +557,12 @@ class ColorfulLineGenerator():
         addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
         return f"     {addr_str}  "
 
+    @staticmethod
+    def GenerateErrorLine(address, address_len, error_msg):
+        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}  {error_msg}", ida_lines.SCOLOR_ERROR)
+        return f"     {addr_str}  "
+
+
 
 
 class TTE_DisassemblyViewer():
@@ -663,8 +693,20 @@ class TTE_DisassemblyViewer():
 
     def ApplyStateMemoryPatchesInViewer(self, mem_diff: Optional[List[Tuple[int, bytes]]], page_diff):
         assert self.memory_pages_list, "State data not loaded"
+        if page_diff:
+            pass
 
-
+        if mem_diff:
+            for addr, value in mem_diff:
+                if addr > self.current_range_display_start and addr < self.current_range_display_end:
+                    addr_info = self.viewer.GetLine(addr, 0)
+                    if addr_info is not None and addr_info.type == SINGLE_DATA_LINE:
+                        line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1)
+                        self.viewer.EditLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
+                    else:
+                        line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1)
+                        self.viewer.UpdateLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
+        self.viewer.Refresh()
 
     def DisplayMemoryPages(self, range_start, range_end):
         assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
@@ -715,13 +757,16 @@ class TTE_DisassemblyViewer():
                     data_size = idc.get_item_size(current_addr)
                     offset = current_addr - start_addr
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[offset : offset + data_size], data_size)
-                    self.viewer.AddLine(current_addr, CODE_LINE, line_text)
+                    if data_size == 1:
+                        self.viewer.AddLine(current_addr, SINGLE_DATA_LINE, line_text)
+                    else:
+                        self.viewer.AddLine(current_addr, CODE_LINE, line_text)
 
                     current_addr += data_size
                     continue
                 else:
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr : current_addr - start_addr + 1], 1)
-                    self.viewer.AddLine(current_addr, CODE_LINE, line_text)
+                    self.viewer.AddLine(current_addr, SINGLE_DATA_LINE, line_text)
 
                     current_addr += 1
                     continue
@@ -996,7 +1041,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
         self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
-        # self.disassembly_viewer.ApplyStateMemoryPatchesInViewer(mem_diff, page_diff)
+        self.disassembly_viewer.ApplyStateMemoryPatchesInViewer(mem_diff, page_diff)
 
 
         if self.follow_current_instruction or self.current_state_id is None:
