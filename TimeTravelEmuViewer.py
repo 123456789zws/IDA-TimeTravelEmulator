@@ -2,6 +2,7 @@ import bisect
 import re
 
 from exceptiongroup import catch
+from sortedcontainers.sorteddict import SortedDict
 from TimeTravelEmulator import EmuState
 import idaapi
 import ida_lines
@@ -764,10 +765,32 @@ class TTE_DisassemblyViewer():
             self.viewer.EditLineColor(address, lineno, None)
 
 
-    def ApplyStateMemoryPatchesInViewer(self, mem_diff: Optional[List[Tuple[int, bytes]]], page_diff):
+    def ApplyStateMemoryPatchesInViewer(self, mem_diff: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
+        """
+        Apply memory patches to the viewer and highlight the changed lines.
+
+        :param mem_diff: A list of tuples (address, value) representing the changed memory.
+        :param page_diff: A sorted dictionary of memory pages, with keys as start addresses and values as tuples (change_mode, data).
+                            change_mode: 1 - removed, 2 - added
+        :return: None
+        """
         assert self.memory_pages_list, "State data not loaded"
         if page_diff:
-            pass
+            need_rebuild = False
+            for start_addr, (change_mode, data) in page_diff.items():
+                if change_mode == 1:
+                    # removed page
+                    for i in range(start_addr, start_addr + PAGE_SIZE):
+                        if i >= self.current_range_display_start and i < self.current_range_display_end:
+                            need_rebuild = True
+
+                elif change_mode == 2:
+                    # added page
+                    for i in range(start_addr, start_addr + PAGE_SIZE):
+                        if i >= self.current_range_display_start and i < self.current_range_display_end:
+                            need_rebuild = True
+            if need_rebuild:
+                self.DisplayMemoryRange(self.current_range_display_start, self.current_range_display_end)
 
         if mem_diff:
             for addr, value in mem_diff:
@@ -784,6 +807,14 @@ class TTE_DisassemblyViewer():
         self.viewer.Refresh()
 
     def DisplayMemoryRange(self, range_start, range_end):
+        """
+        Display memory range in the viewer. This function will clear the previous range and display the new range.
+        By the way, it can also be used to refresh the current range.
+
+        :param range_start: start address of the range.
+        :param range_end: end address of the range.
+        :return: None
+        """
         assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
         assert self.memory_pages_list and self.execution_counts, "State data not loaded"
 
@@ -1011,6 +1042,10 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                               f"{self.title}:PrevStateAction",
                               self.DisplayPrevState, "Previous state", PREV_STATE_ACTION_SHORTCUT))
 
+        self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.title}:StageInputAction",
+                              self.DisplayInputState, "Switch to input state", "S"))
+
 
 
 
@@ -1075,6 +1110,24 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
 
 
+    def DisplayInputState(self):
+        assert self.state_manager is not None, "No state_manager loaded"
+
+        input_str = ida_kernwin.ask_str(self.current_state_id, 0, "Input state ID:")
+        if input_str:
+            if input_str in self.state_manager.states_dict:
+                self.SwitchStateDisplay(input_str)
+            else:
+                idaapi.warning("Input state ID not found")
+
+
+
+
+
+
+
+
+
     def _GetPreStateDiff(self, state_id: str) -> Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]]]:
         assert self.state_manager is not None, "No state_manager loaded"
 
@@ -1107,7 +1160,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         regs_diff: Optional[Dict[str, int]] = None
         mem_diff: Optional[List[Tuple[int, bytes]]] = None
-        page_diff = None
+        page_diff: Optional[SortedDict] = None
 
         # if target_state.prev_state_id == self.current_state_id:
         #     regs_diff, mem_diff = self._GetPreStateDiff(state_id)
