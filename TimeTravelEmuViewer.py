@@ -1090,6 +1090,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.registers_viewer: TTE_RegistersViewer = TTE_RegistersViewer()
         self.mempages_viewer: TTE_MemoryViewer = TTE_MemoryViewer()
 
+
+        self.states_chooser: Optional[ida_kernwin.Choose] = None
+        self.memory_pages_chooser: Optional[ida_kernwin.Choose] = None
+
+
+
+
         self.state_manager: Optional[EmuStateManager] = None
         self.state_list: Optional[List[Tuple[str, EmuState]]] = None # List of (state_id, state) formed in order of generation
 
@@ -1123,6 +1130,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                               f"{self.title}:ChooseStatesAction",
                               self.ChooseStatesAction,   "Choose states", "C"))
 
+        self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.title}:ChooseMemoryPagesAction",
+                              self.ChooseMemoryPagesAction,   "Choose memory pages", "M"))
+
+        # self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+        #                       f"{self.title}:FollowCurrentInstructionAction",
+        #                       self.ToggleFollowCurrentInstruction, "Toggle follow current instruction", "F"))
 
     def OnCreate(self, form):
         self.parent = self.FormToPyQtWidget(form)
@@ -1239,14 +1253,79 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
 
-        assert self.state_list is not None, "No state_list loaded"
-        c = StateChooser("State Chooser", self.state_list, self.SwitchStateDisplay)
-        c.Show()
+        if self.state_list is None:
+            tte_log_dbg("No state_list loaded")
+            return
+
+        self.states_chooser = StateChooser("State Chooser", self.state_list, self.SwitchStateDisplay)
+        self.states_chooser.Show()
 
 
+    def ChooseMemoryPagesAction(self):
+
+        class MemPageChooser(ida_kernwin.Choose):
+            def __init__(self, title, get_current_full_state_func, display_memory_range_func):
+                ida_kernwin.Choose.__init__(
+                    self,
+                    title,
+                    [
+                        ["address", 10 | ida_kernwin.Choose.CHCOL_HEX],
+                        ["R", 3 | ida_kernwin.Choose.CHCOL_DEC],
+                        ["W", 3 | ida_kernwin.Choose.CHCOL_DEC],
+                        ["X", 3 | ida_kernwin.Choose.CHCOL_DEC],
+                        ["size", 10 | ida_kernwin.Choose.CHCOL_HEX],
+                    ])
+                self.get_current_full_state_func = get_current_full_state_func
+                self.display_memory_range_func = display_memory_range_func
+                self.bitness = get_bitness()
+                if self.bitness:
+                    self.hex_len = self.bitness // 4
+                else:
+                    tte_log_err("Failed to get bitness")
+
+            def OnInit(self):
+                memory_pages_list: List[Tuple[int, int, bytearray]] = [(addr, perm, data) for addr, (perm, data) in self.get_current_full_state_func().memory_pages.items()]
+                self.items = [[
+                                f"0x{addr:0{self.hex_len}X}",
+                                "R" if perm & UC_PROT_READ else " ",
+                                "W" if perm & UC_PROT_WRITE else " ",
+                                "X" if perm & UC_PROT_EXEC else " ",
+                                f"0x{len(data):X}"]
+                                for addr, perm, data in memory_pages_list]
+                return True
+
+            def OnGetSize(self):
+                return len(self.items)
+
+            def OnGetLine(self, n):
+                return self.items[n]
+
+            def OnDeleteLine(self, n):
+                pass
+
+            def OnSelectLine(self, n):
+                addr = int(self.items[n][0], 16)
+                size = int(self.items[n][4], 16)
+                self.display_memory_range_func(addr, addr + size)
+                return ida_kernwin.Choose.NOTHING_CHANGED
+
+            def OnRefresh(self, n):
+                self.OnInit()
+                return [ida_kernwin.Choose.ALL_CHANGED] + self.adjust_last_item(n)
+
+        if self.current_full_state is None:
+            tte_log_dbg("No current full state")
+            return
+
+        self.memory_pages_chooser = MemPageChooser("Memory Page Chooser", lambda : self.current_full_state, self.disassembly_viewer.DisplayMemoryRange)
+        self.memory_pages_chooser.Show()
 
 
-
+    def RefreshSubviewers(self):
+        if self.states_chooser:
+            self.states_chooser.Refresh()
+        if self.memory_pages_chooser:
+            self.memory_pages_chooser.Refresh()
 
 
     def _GetPreStateDiff(self, state_id: str) -> Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]]]:
@@ -1309,6 +1388,10 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.current_full_state = target_full_state
         self.current_state_id = state_id
+
+        self.RefreshSubviewers()
+
+
         return
 
 
