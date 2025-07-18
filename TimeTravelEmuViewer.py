@@ -1093,7 +1093,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.states_chooser: Optional[ida_kernwin.Choose] = None
         self.memory_pages_chooser: Optional[ida_kernwin.Choose] = None
-
+        self.diff_chooser: Optional[ida_kernwin.Choose] = None
 
 
 
@@ -1103,6 +1103,8 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.current_state_idx: int = 0 # Index of current state in state_list.
         self.current_state_id: Optional[str] = None # Only SwitchStateDisplay() can change this value.
         self.current_full_state: Optional[FullEmuState] = None # Only SwitchStateDisplay() can change this value.
+
+        self.current_diffs: Optional[Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]], Optional[SortedDict]]] = None
 
         # configs
         self.follow_current_instruction = True # False # Whether to follow the current instruction when switching states.
@@ -1133,6 +1135,12 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.title}:ChooseMemoryPagesAction",
                               self.ChooseMemoryPagesAction,   "Choose memory pages", "M"))
+
+        self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.title}:ShowDiffAction",
+                              self.ShowDiffsAciton,   "Show diff", "D"))
+
+
 
         # self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
         #                       f"{self.title}:FollowCurrentInstructionAction",
@@ -1320,12 +1328,82 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.memory_pages_chooser = MemPageChooser("Memory Page Chooser", lambda : self.current_full_state, self.disassembly_viewer.DisplayMemoryRange)
         self.memory_pages_chooser.Show()
 
+    def ShowDiffsAciton(self):
+
+        class DiffsChooser(ida_kernwin.Choose):
+            def __init__(self, title, get_current_diff_func, jumpto_address_func):
+                ida_kernwin.Choose.__init__(
+                    self,
+                    title,
+
+                    [
+                        ["Diff Type", 10 | ida_kernwin.Choose.CHCOL_PLAIN],
+                        ['Diff Location', 10 | ida_kernwin.Choose.CHCOL_HEX],
+                        ["Diff Value", 10 | ida_kernwin.Choose.CHCOL_PLAIN],
+                     ])
+
+                self.get_current_diff_func = get_current_diff_func
+                self.jumpto_address_func = jumpto_address_func
+                self.bitness = get_bitness()
+                if self.bitness:
+                    self.hex_len = self.bitness // 4
+                else:
+                    tte_log_err("Failed to get bitness")
+
+            def OnInit(self):
+                regs_diff, mem_diff, page_diff = self.get_current_diff_func() # Optional[Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]], Optional[SortedDict]]]
+                self.items = []
+                if regs_diff:
+                    for reg_name, reg_val in regs_diff.items():
+                        self.items.append(["reg diffs", reg_name, f"0x{reg_val:X}"])
+                if mem_diff:
+                    for addr, data in mem_diff:
+                        self.items.append(["mem diffs", f"0x{addr:0{self.hex_len}X}", f"0x{data.hex()}"])
+                if page_diff:
+                    for addr, (mode, (perm, data)) in page_diff.items():
+                        if mode == 2:
+                            self.items.append(["add page", f"0x{addr:0{self.hex_len}X}", f"perm: 0x{perm:X}"])
+                        elif mode == 1:
+                            self.items.append(["del page", f"0x{addr:0{self.hex_len}X}", f"perm: 0x{perm:X}"])
+
+            def OnGetSize(self):
+                return len(self.items)
+
+            def OnDeleteLine(self, n):
+                pass
+
+            def OnGetLine(self, n):
+                return self.items[n]
+
+            def OnSelectLine(self, n):
+                locate = self.items[n][1]
+                if locate.startswith("0x"):
+                    try:
+                        addr = int(locate, 16)
+                        self.jumpto_address_func(addr)
+                    except:
+                        pass
+                return ida_kernwin.Choose.NOTHING_CHANGED
+
+            def OnRefresh(self, n):
+                self.OnInit()
+                return [ida_kernwin.Choose.ALL_CHANGED] + self.adjust_last_item(n)
+
+        if self.state_list is None:
+            tte_log_dbg("No state_list loaded")
+
+        self.diff_chooser = DiffsChooser("Diffs Chooser", lambda : self.current_diffs, self.disassembly_viewer.JumpTo)
+        self.diff_chooser.Show()
+
+
 
     def RefreshSubviewers(self):
         if self.states_chooser:
             self.states_chooser.Refresh()
         if self.memory_pages_chooser:
             self.memory_pages_chooser.Refresh()
+        if self.diff_chooser:
+            self.diff_chooser.Refresh()
 
 
     def _GetPreStateDiff(self, state_id: str) -> Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]]]:
@@ -1373,6 +1451,8 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                 regs_diff = entry[0]
                 mem_diff = [(addr, data.to_bytes(1, byteorder='big' if get_is_be() else 'little')) for addr, (_, data) in entry[1].items()]
                 page_diff = entry[2]
+        self.current_diffs = (regs_diff, mem_diff, page_diff)
+
 
         self.disassembly_viewer.ClearHighlightLines()
         self.disassembly_viewer.LoadState(state_id, target_full_state.instruction_address, target_full_state.memory_pages)
