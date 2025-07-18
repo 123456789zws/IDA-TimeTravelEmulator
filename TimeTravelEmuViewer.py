@@ -122,7 +122,9 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         self._lines_data_buffer: List[address_line_info] = []
 
         self.need_rebuild = False # Flag to indicate if the viewer needs to be refreshed
+
         self.keydown_callback_list: List[Tuple[int, bool, Callable]] = [] # List[(ord_key, is_shift, callback_func)], Callback functions list called when corresponding keys is down
+        self.dbl_click_callback: Optional[Callable] = None # Callback function called when double-clicking a line
         self.menu_action_handlers = []
 
 
@@ -405,7 +407,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         :return: Boolean indicating success.
         """
         self.CheckRebuild()
-        idx = self._lines_data.bisect_right(address_line_info(address = address))
+        idx = self._lines_data.bisect_left(address_line_info(address = address + 1 ,address_idx = -1))
         if idx > 0:
             lineno = idx - 1
             return super().Jump(lineno, x, y)
@@ -462,38 +464,48 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             return lineno
         return None
 
-    def _JumpToWord(self, word):
-        ea = None
-        if all(c in "x0123456789abcdefABCDEF" for c in word):
-            try:
-                ea = int(word,16) # word is a address
-            except ValueError:
-                pass
-        else:
-            segm = idaapi.get_segm_by_name(word)
-            if segm:
-                ea = segm.start_ea # word is a segment name
-            else:
-                ea =  idaapi.str2ea(word) # word is a name
+    # def _JumpToWord(self, word):
+    #     ea = None
+    #     if all(c in "x0123456789abcdefABCDEF" for c in word):
+    #         try:
+    #             ea = int(word,16) # word is a address
+    #         except ValueError:
+    #             pass
+    #     else:
+    #         segm = idaapi.get_segm_by_name(word)
+    #         if segm:
+    #             ea = segm.start_ea # word is a segment name
+    #         else:
+    #             ea =  idaapi.str2ea(word) # word is a name
 
-        if ea == idaapi.BADADDR:
-            result: List[str] = split(r'\.|:|;|\+|-|\[|\]', word)
-            if result:
-                for w in reversed(result):
-                    ea =  idaapi.str2ea(w)
-                    if ea != idaapi.BADADDR:
-                        break
+    #     if ea == idaapi.BADADDR:
+    #         result: List[str] = split(r'\.|:|;|\+|-|\[|\]', word)
+    #         if result:
+    #             for w in reversed(result):
+    #                 ea =  idaapi.str2ea(w)
+    #                 if ea != idaapi.BADADDR:
+    #                     break
 
-        if ea:
-            return idaapi.jumpto(ea)
-        return False
+    #     if ea:
+    #         return idaapi.jumpto(ea)
+    #     return False
+
+
+    # def OnDblClick(self, shift):
+    #     dblclick_word = self.GetCurrentWord()
+    #     if not dblclick_word:
+    #         return False
+    #     return self._JumpToWord(dblclick_word)
+
+
+    def SetDblChickCallback(self, callback):
+        self.dbl_click_callback = callback
 
 
     def OnDblClick(self, shift):
-        dblclick_word = self.GetCurrentWord()
-        if not dblclick_word:
-            return False
-        return self._JumpToWord(dblclick_word)
+        if self.dbl_click_callback:
+            return self.dbl_click_callback(self)
+        return False
 
 
     def OnKeydown(self, vkey, shift):
@@ -630,7 +642,52 @@ class TTE_DisassemblyViewer():
         self.viewer.Create(self.title)
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self._SetCustomViewerStatusBar()
+        self._SetDoubleClickCallback()
         self._SetMenuActions()
+
+
+
+    def _SetDoubleClickCallback(self):
+
+        def OnDblClickAction(custom_viewer: AddressAwareCustomViewer):
+            """
+            Action:
+                If user double click a address, jump to it in IDA View
+                If user double click a word, jump to it's address in CustomViewer
+            """
+            dblclick_word = custom_viewer.GetCurrentWord()
+            if not dblclick_word:
+                return False
+            ea = None
+            if all(c in "x0123456789abcdefABCDEF" for c in dblclick_word):
+                try:
+                    ea = int(dblclick_word,16) # word is a address
+                    return idaapi.jumpto(ea)
+                except ValueError:
+                    pass
+
+            if ea is None:
+                segm = idaapi.get_segm_by_name(dblclick_word)
+                if segm:
+                    ea = segm.start_ea # word is a segment name
+                else:
+                    ea =  idaapi.str2ea(dblclick_word) # word is a name
+
+            if ea == idaapi.BADADDR:
+                result: List[str] = split(r'\.|:|;|\+|-|\[|\]', dblclick_word)
+                if result:
+                    for w in reversed(result):
+                        ea =  idaapi.str2ea(w)
+                        if ea != idaapi.BADADDR:
+                            break
+            if ea != idaapi.BADADDR:
+                self.JumpTo(ea)
+                return True
+            return False
+
+        self.viewer.SetDblChickCallback(OnDblClickAction)
+
+
 
 
     def _SetMenuActions(self):
@@ -1041,7 +1098,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.current_full_state: Optional[FullEmuState] = None # Only SwitchStateDisplay() can change this value.
 
         # configs
-        self.follow_current_instruction = False # True # Whether to follow the current instruction when switching states.
+        self.follow_current_instruction = True # False # Whether to follow the current instruction when switching states.
 
 
 
