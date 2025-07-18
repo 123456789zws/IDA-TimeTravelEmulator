@@ -41,7 +41,7 @@ PAGE_SIZE = 0x1000
 NEXT_STATE_ACTION_SHORTCUT = "F3"
 PREV_STATE_ACTION_SHORTCUT = "F2"
 
-
+EXECUTE_INSN_HILIGHT_COLOR = 0xFFD073
 CHANGE_HIGHLIGHT_COLOR   = 0xFFD073
 
 
@@ -611,16 +611,18 @@ class TTE_DisassemblyViewer():
         self.statusbar_memory_range_qlabel: Optional[QtWidgets.QLabel] = None
 
         self.execution_counts = None
+        self.codelines_list:Dict[int, int] = {}  # {address : address_idx)}
 
 
         self.current_state_id = None
         self.memory_pages_list = None
 
+        self.current_insn_address: int = -1
         self.current_range_display_start: int = -1;
         self.current_range_display_end: int = -1;
 
 
-        self.change_hightlight_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, lineno, color),...]
+        self.hightlighting_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, lineno, color),...]
 
 
 
@@ -651,6 +653,7 @@ class TTE_DisassemblyViewer():
 
     def ClearLines(self):
         self.viewer.ClearLines()
+        self.current_insn_address = -1
         self.current_range_display_start = -1;
         self.current_range_display_end = -1;
 
@@ -746,26 +749,31 @@ class TTE_DisassemblyViewer():
         self.execution_counts= {state.instruction_address: state.execution_count for _, state in state_list}
 
 
-    def LoadStateMemory(self, state_id: str, memory_pages: Dict[int, Tuple[int, bytearray]]):
+    def LoadState(self, state_id: str, insn_address: int, memory_pages: Dict[int, Tuple[int, bytearray]]):
         assert self.statusbar_state_id_qlabel, "Status bar not initialized"
 
+        self.current_insn_address = insn_address
         self.current_state_id = state_id
         self.memory_pages_list = sorted(memory_pages.items())
         self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state_id} ]")
 
 
+    def AddHightlightLine(self, address, address_idx, color):
+        self.hightlighting_lines.append((address, address_idx, color))
+
+
     def HighlightLines(self):
-        for address, lineno, color in self.change_hightlight_lines:
-            self.viewer.EditLineColor(address, lineno, 0, color)
+        for address, address_idx, color in self.hightlighting_lines:
+            self.viewer.EditLineColor(address, address_idx, 0, color)
 
 
     def ClearHighlightLines(self):
-        while len(self.change_hightlight_lines) > 0:
-            address, lineno, color = self.change_hightlight_lines.pop()
+        while len(self.hightlighting_lines) > 0:
+            address, lineno, color = self.hightlighting_lines.pop()
             self.viewer.EditLineColor(address, lineno, None)
 
 
-    def ApplyStateMemoryPatchesInViewer(self, mem_diff: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
+    def ApplyStatePatchesInViewer(self, mem_diff: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
         """
         Apply memory patches to the viewer and highlight the changed lines.
 
@@ -802,7 +810,10 @@ class TTE_DisassemblyViewer():
                     else:
                         line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1)
                         self.viewer.UpdateLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
-                self.change_hightlight_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
+                self.hightlighting_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
+
+        if self.current_insn_address > 0 and self.current_insn_address > self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
+            self.AddHightlightLine(self.current_insn_address, self.codelines_list.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
         self.HighlightLines()
         self.viewer.Refresh()
 
@@ -835,6 +846,7 @@ class TTE_DisassemblyViewer():
 
             while current_addr < start_addr + PAGE_SIZE and current_addr < range_end:
                 count = 0
+                address_idx = 0
                 if current_addr in self.execution_counts:
                     count = self.execution_counts[current_addr]
 
@@ -846,6 +858,7 @@ class TTE_DisassemblyViewer():
                     line_text = ColorfulLineGenerator.GenerateDisassemblyNameLine(current_addr, self.addr_len)
                     self.viewer.AddLine(current_addr, EMPTY_LINE, empty_line_text)
                     self.viewer.AddLine(current_addr, NAME_LINE, line_text)
+                    address_idx += 2
 
                 if idc.is_code(current_addr_flag):
                     code_size = idc.get_item_size(current_addr)
@@ -855,7 +868,7 @@ class TTE_DisassemblyViewer():
                                                                                        code_size,
                                                                                        count)
                     self.viewer.AddLine(current_addr, CODE_LINE, line_text)
-
+                    self.codelines_list[current_addr] = address_idx
                     current_addr += code_size
                     continue
 
@@ -885,8 +898,11 @@ class TTE_DisassemblyViewer():
 
         self.current_range_display_start = range_start
         self.current_range_display_end = range_end
-        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
 
+        # Highlight current instruction in memory range.
+        self.AddHightlightLine(self.current_insn_address, self.codelines_list.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
+        # Set status bar memory range label.
+        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
         self.HighlightLines()
         self.viewer.Refresh()
 
@@ -1112,11 +1128,14 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
     def DisplayInputState(self):
         assert self.state_manager is not None, "No state_manager loaded"
+        assert self.state_list is not None, "No state_list loaded"
 
         input_str = ida_kernwin.ask_str(self.current_state_id, 0, "Input state ID:")
         if input_str:
-            if input_str in self.state_manager.states_dict:
-                self.SwitchStateDisplay(input_str)
+            target_state_idx = next((i for i, (x, y) in enumerate(self.state_list) if x == input_str), -1)
+            if target_state_idx >= 0:
+                self.current_state_idx = target_state_idx
+                self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
             else:
                 idaapi.warning("Input state ID not found")
 
@@ -1173,8 +1192,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                 page_diff = entry[2]
 
         self.disassembly_viewer.ClearHighlightLines()
-        self.disassembly_viewer.LoadStateMemory(state_id, target_full_state.memory_pages)
-        self.disassembly_viewer.ApplyStateMemoryPatchesInViewer(mem_diff, page_diff)
+        self.disassembly_viewer.LoadState(state_id, target_full_state.instruction_address, target_full_state.memory_pages)
+        self.disassembly_viewer.ApplyStatePatchesInViewer(mem_diff, page_diff)
+
 
         if self.follow_current_instruction or self.current_state_id is None:
             self.disassembly_viewer.JumpTo(target_state.instruction_address)
