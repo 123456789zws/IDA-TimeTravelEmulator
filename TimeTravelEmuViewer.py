@@ -1119,7 +1119,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                               f"{self.title}:StageInputAction",
                               self.DisplayInputState, "Switch to input state", "S"))
 
-
+        self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.title}:ChooseStatesAction",
+                              self.ChooseStatesAction,   "Choose states", "C"))
 
 
     def OnCreate(self, form):
@@ -1197,6 +1199,49 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                 idaapi.warning("Input state ID not found")
 
 
+    def ChooseStatesAction(self):
+
+        class StateChooser(ida_kernwin.Choose):
+            def __init__(self, title, state_list: List[Tuple[str, EmuState]], switch_state_display_func):
+                ida_kernwin.Choose.__init__(
+                    self,
+                    title,
+
+                    [
+                        ["Idx", 10 | ida_kernwin.Choose.CHCOL_DEC],
+                        ["State ID", 10 | ida_kernwin.Choose.CHCOL_PLAIN],
+                     ])
+                self.state_list = state_list
+                self.switch_state_display_func = switch_state_display_func
+
+
+            def OnInit(self):
+                self.items = [ [str(i), state_id] for i, (state_id, state) in enumerate(self.state_list) ]
+                return True
+
+            def OnGetSize(self):
+                return len(self.items)
+
+            def OnGetLine(self, n):
+                return self.items[n]
+
+            def OnDeleteLine(self, n):
+                pass
+
+            def OnSelectLine(self, n):
+                ida_kernwin.msg(f"Switch to state {self.items[n][1]}\n")
+                self.switch_state_display_func(self.items[n][1])
+                return ida_kernwin.Choose.NOTHING_CHANGED
+
+            def OnRefresh(self, n):
+                self.OnInit()
+                return [ida_kernwin.Choose.ALL_CHANGED] + self.adjust_last_item(n)
+
+
+
+        assert self.state_list is not None, "No state_list loaded"
+        c = StateChooser("State Chooser", self.state_list, self.SwitchStateDisplay)
+        c.Show()
 
 
 
@@ -1227,6 +1272,8 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
     def SwitchStateDisplay(self, state_id: str, show_pre_state_diff = True):
         assert self.state_manager is not None, "No state_manager loaded"
+        if state_id == self.current_state_id:
+            return
 
         target_state = self.state_manager.get_state(state_id)
         assert target_state is not None, f"State {state_id} not found in state_manager"
