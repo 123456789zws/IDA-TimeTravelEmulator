@@ -1425,7 +1425,39 @@ class EmuTracer():
 
 
 
+class InstrctionParser():
+    """
+    Class for parsing instructions and extracting relevant information.
+    """
+    _instance = None
+    _initialized = False
 
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(InstrctionParser, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+
+        self.arch = get_arch()
+        self.capstone_arch, self.capstone_mode = CAPSTONE_ARCH_MAP[self.arch]
+        self.md = Cs(self.capstone_arch, self.capstone_mode)
+
+
+
+    def parse_instruction(self, insn_bytes: bytes) -> str:
+        """
+        Parses an instruction and returns a tuple of (opcode, operand)
+        """
+        assert self.md is not None, "InstrctionParser not initialized"
+        try:
+            _, _, opcode, operand = next(self.md.disasm_lite(insn_bytes, 0))
+            return f"{opcode}\t{operand}"
+        except StopIteration:
+            return ""
 
 
 

@@ -1239,13 +1239,14 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                     [
                         ["Idx", 10 | ida_kernwin.Choose.CHCOL_DEC],
                         ["State ID", 10 | ida_kernwin.Choose.CHCOL_PLAIN],
+                        ["Instruction", 10 | ida_kernwin.Choose.CHCOL_HEX]
                      ])
                 self.state_list = state_list
                 self.switch_state_display_func = switch_state_display_func
 
 
             def OnInit(self):
-                self.items = [ [str(i), state_id] for i, (state_id, state) in enumerate(self.state_list) ]
+                self.items = [ [str(i), state_id, InstrctionParser().parse_instruction(state.instruction)] for i, (state_id, state) in enumerate(self.state_list) ]
                 return True
 
             def OnGetSize(self):
