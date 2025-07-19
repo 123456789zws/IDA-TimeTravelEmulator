@@ -1,8 +1,5 @@
 import bisect
-import re
 
-from exceptiongroup import catch
-from httpx import get
 from sortedcontainers.sorteddict import SortedDict
 from TimeTravelEmulator import EmuState
 import idaapi
@@ -638,7 +635,7 @@ class TTE_DisassemblyViewer():
     5. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
-    title = "TimeTravelEmuDisassembly"
+    title = "TimeTravelEmuDisassemblyViewer"
 
     def __init__(self):
         self.viewer = AddressAwareCustomViewer()
@@ -1008,7 +1005,7 @@ class TTE_RegistersViewer:
     4. call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
-    title = "TimeTravelEmuRegisters"
+    title = "TimeTravelEmuRegistersViewer"
 
     def __init__(self):
         self.viewer = ida_kernwin.simplecustviewer_t()
@@ -1089,7 +1086,7 @@ class TTE_MemoryViewer:
     5. Call TimeTravelEmuViewer.Show() to show the viewer with this subviewer.
     """
 
-    title = "TimeTravelEmuMemory"
+    title = "TimeTravelEmuMemoryViewer"
     BYTES_PER_LINE = 16 # How many bytes to display per line in the memory dump
 
     def __init__(self):
@@ -1461,12 +1458,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.registers_viewer: TTE_RegistersViewer = TTE_RegistersViewer()
         self.mempages_viewer: TTE_MemoryViewer = TTE_MemoryViewer()
 
-
-        self.states_chooser: Optional[ida_kernwin.Choose] = None
-        self.memory_pages_chooser: Optional[ida_kernwin.Choose] = None
-        self.diff_chooser: Optional[ida_kernwin.Choose] = None
-
-
+        self.subchooser_list: List[ida_kernwin.Choose] = []
 
         self.state_manager: Optional[EmuStateManager] = None
         self.state_list: Optional[List[Tuple[str, EmuState]]] = None # List of (state_id, state) formed in order of generation
@@ -1488,33 +1480,45 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.mempages_viewer.InitViewer()
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
-                              f"{self.title}:NextStateAction",
+                              f"{self.disassembly_viewer.title}:NextStateAction",
                               self.DisplayNextState, "Next state", NEXT_STATE_ACTION_SHORTCUT))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
-                              f"{self.title}:PrevStateAction",
+                              f"{self.disassembly_viewer.title}:PrevStateAction",
                               self.DisplayPrevState, "Previous state", PREV_STATE_ACTION_SHORTCUT))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
-                              f"{self.title}:StageInputAction",
+                              f"{self.disassembly_viewer.title}:StageInputAction",
                               self.DisplayInputState, "Switch to input state", "S"))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
-                              f"{self.title}:ChooseStatesAction",
+                              f"{self.disassembly_viewer.title}:ChooseStatesAction",
                               self.ChooseStatesAction,   "Choose states", "C"))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
-                              f"{self.title}:ChooseMemoryPagesAction",
-                              self.ChooseMemoryPagesAction,   "Choose memory pages", "M"))
+                              f"{self.disassembly_viewer.title}:ChooseMemoryPagesAction",
+                              lambda : self.ChooseMemoryPagesAction(self.disassembly_viewer.title, self.disassembly_viewer.DisplayMemoryRange),   "Choose memory pages", "M"))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
-                              f"{self.title}:ShowDiffAction",
-                              self.ShowDiffsAciton,   "Show diff", "D"))
+                              f"{self.disassembly_viewer.title}:ShowDiffAction",
+                              lambda : self.ShowDiffsAciton(self.disassembly_viewer.title, self.disassembly_viewer.JumpTo),   "Show diff", "D"))
 
-        # Add "Follow Current Instruction" action to the main viewer
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
-                              f"{self.title}:ToggleFollowCurrentInstructionAction",
+                              f"{self.disassembly_viewer.title}:ToggleFollowCurrentInstructionAction",
                               self.ToggleFollowCurrentInstruction, "Toggle follow current instruction (F)", "F"))
+
+        self.mempages_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.mempages_viewer.title}:ChooseMemoryPagesAction",
+                              lambda : self.ChooseMemoryPagesAction(self.mempages_viewer.title, self.mempages_viewer.DisplayMemoryRange),   "Choose memory pages", "M"))
+
+        self.mempages_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.mempages_viewer.title}:ShowDiffAction",
+                              lambda : self.ShowDiffsAciton(self.mempages_viewer.title, self.mempages_viewer.JumpTo),   "Show diff", "D"))
+
+
+
+
+
 
 
     def OnCreate(self, form):
@@ -1524,12 +1528,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
     def OnClose(self, form):
-        if self.states_chooser:
-            self.states_chooser.Close()
-        if self.memory_pages_chooser:
-            self.memory_pages_chooser.Close()
-        if self.diff_chooser:
-            self.diff_chooser.Close()
+        for sub_chooser in self.subchooser_list:
+            if sub_chooser:
+                sub_chooser.Close()
 
 
     def ToggleFollowCurrentInstruction(self):
@@ -1625,6 +1626,8 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                         ["State ID", 10 | ida_kernwin.Choose.CHCOL_PLAIN],
                         ["Instruction", 10 | ida_kernwin.Choose.CHCOL_HEX]
                      ])
+                self.is_available = True
+
                 self.state_list = state_list
                 self.switch_state_display_func = switch_state_display_func
 
@@ -1635,6 +1638,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                         InstrctionParser().parse_instruction(state.instruction)]
                         for i, (state_id, state) in enumerate(self.state_list)]
                 return True
+
+            def OnClose(self):
+                self.is_available = False
 
             def OnGetSize(self):
                 return len(self.items)
@@ -1662,12 +1668,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.states_chooser = StateChooser("State Chooser", self.state_list, self.SwitchStateDisplay)
         self.states_chooser.Show()
+        self.subchooser_list.append(self.states_chooser)
 
 
-    def ChooseMemoryPagesAction(self):
+    def ChooseMemoryPagesAction(self, parent_title: str,  display_memory_range_func):
 
         class MemPageChooser(ida_kernwin.Choose):
-            def __init__(self, title, get_current_full_state_func, display_memory_range_func_disasm, display_memory_range_func_mem):
+            def __init__(self, title, get_current_full_state_func, display_memory_range_func):
                 ida_kernwin.Choose.__init__(
                     self,
                     title,
@@ -1678,9 +1685,10 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                         ["X", 3 | ida_kernwin.Choose.CHCOL_DEC],
                         ["size", 10 | ida_kernwin.Choose.CHCOL_HEX],
                     ])
+                self.is_available = True
+
                 self.get_current_full_state_func = get_current_full_state_func
-                self.display_memory_range_func_disasm = display_memory_range_func_disasm
-                self.display_memory_range_func_mem = display_memory_range_func_mem
+                self.display_memory_range_func = display_memory_range_func
                 self.bitness = get_bitness()
                 if self.bitness:
                     self.hex_len = self.bitness // 4
@@ -1703,6 +1711,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                     self.items = [] # No state, no items
                 return True
 
+            def OnClose(self):
+                self.is_available = False
+
             def OnGetSize(self):
                 return len(self.items)
 
@@ -1715,12 +1726,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             def OnSelectLine(self, n):
                 addr = int(self.items[n][0], 16)
                 size = int(self.items[n][4], 16)
-
-                # Jump in Disassembly View
-                self.display_memory_range_func_disasm(addr, addr + size)
-
-                # Jump in Memory View
-                self.display_memory_range_func_mem(addr, addr + size)
+                self.display_memory_range_func(addr, addr + size)
 
                 return ida_kernwin.Choose.NOTHING_CHANGED
 
@@ -1732,13 +1738,15 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             tte_log_dbg("No current full state")
             return
 
-        self.memory_pages_chooser = MemPageChooser("Memory Page Chooser", lambda : self.current_full_state, self.disassembly_viewer.DisplayMemoryRange, self.mempages_viewer.DisplayMemoryRange)
+        self.memory_pages_chooser = MemPageChooser(f"Memory Chooser for {parent_title}", lambda : self.current_full_state, display_memory_range_func)
         self.memory_pages_chooser.Show()
+        self.subchooser_list.append(self.memory_pages_chooser)
 
-    def ShowDiffsAciton(self):
+
+    def ShowDiffsAciton(self, parent_title: str, jumpto_address_func):
 
         class DiffsChooser(ida_kernwin.Choose):
-            def __init__(self, title, get_current_diff_func, jumpto_address_func_disasm, jumpto_address_func_mem):
+            def __init__(self, title, get_current_diff_func, jumpto_address_func):
                 ida_kernwin.Choose.__init__(
                     self,
                     title,
@@ -1748,10 +1756,11 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                         ['Diff Location', 10 | ida_kernwin.Choose.CHCOL_HEX],
                         ["Diff Value", 10 | ida_kernwin.Choose.CHCOL_PLAIN],
                      ])
+                self.is_available = True
 
                 self.get_current_diff_func = get_current_diff_func
-                self.jumpto_address_func_disasm = jumpto_address_func_disasm
-                self.jumpto_address_func_mem = jumpto_address_func_mem
+                self.jumpto_address_func = jumpto_address_func
+
                 self.bitness = get_bitness()
                 if self.bitness:
                     self.hex_len = self.bitness // 4
@@ -1781,6 +1790,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                             self.items.append(["del page", f"0x{addr:0{self.hex_len}X}", f"perm: 0x{perm:X}, size: 0x{len(data):X}"])
                 return True
 
+            def OnClose(self):
+                self.is_available = False
+
             def OnGetSize(self):
                 return len(self.items)
 
@@ -1790,16 +1802,14 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             def OnGetLine(self, n):
                 return self.items[n]
 
-            def OnSelectLine(self, n, selected_multiple):
-                if not selected_multiple:
-                    locate = self.items[n][1]
-                    if locate.startswith("0x"):
-                        try:
-                            addr = int(locate, 16)
-                            self.jumpto_address_func_disasm(addr) # Jump in disassembly view
-                            self.jumpto_address_func_mem(addr)    # Jump in memory view
-                        except ValueError:
-                            pass # Not a valid address
+            def OnSelectLine(self, n):
+                locate = self.items[n][1]
+                if locate.startswith("0x"):
+                    try:
+                        addr = int(locate, 16)
+                        self.jumpto_address_func(addr)
+                    except ValueError:
+                        pass # Not a valid address
                 return ida_kernwin.Choose.NOTHING_CHANGED
 
             def OnRefresh(self, n):
@@ -1810,18 +1820,21 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             tte_log_dbg("No state_list loaded")
             return
 
-        self.diff_chooser = DiffsChooser("Diffs Chooser", lambda : self.current_diffs, self.disassembly_viewer.JumpTo, self.mempages_viewer.JumpTo)
+        self.diff_chooser = DiffsChooser(
+            f"Diffs Chooser for {parent_title}",
+            lambda : self.current_diffs, jumpto_address_func)
         self.diff_chooser.Show()
+        self.subchooser_list.append(self.diff_chooser)
 
 
 
     def RefreshSubviewers(self):
-        if self.states_chooser:
-            self.states_chooser.Refresh()
-        if self.memory_pages_chooser:
-            self.memory_pages_chooser.Refresh()
-        if self.diff_chooser:
-            self.diff_chooser.Refresh()
+        self.subchooser_list = [subchooser for subchooser in self.subchooser_list if hasattr(subchooser, "is_available") and subchooser.is_available] # type: ignore
+        for chooser in self.subchooser_list:
+            chooser.Refresh()
+
+
+
 
 
     def SwitchStateDisplay(self, state_id: str):
