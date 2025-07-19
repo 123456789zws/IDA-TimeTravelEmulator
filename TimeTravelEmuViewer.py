@@ -42,7 +42,7 @@ PREV_STATE_ACTION_SHORTCUT = "F2"
 EXECUTE_INSN_HILIGHT_COLOR = 0xFFD073
 CHANGE_HIGHLIGHT_COLOR   = 0xFFD073
 
-
+BYTE_CHANGE_HIGHTLIGHT = ida_kernwin.CK_EXTRA11
 
 
 
@@ -462,6 +462,32 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             return lineno
         return None
 
+    def GetLineNoFromAddress(self, address):
+        """
+        Returns the line number associated with the given binary address.
+        :param address: The binary address to search for.
+        :return: Returns the line number or -1 if address not found.
+        """
+        self.CheckRebuild()
+        lineno = self._get_lineno_left_from_address(address)
+        if lineno != -1:
+            return lineno
+        return -1
+
+    def GetAddressFromLineNo(self, lineno):
+        """
+        Returns the binary address associated with the given line number.
+        :param lineno: The line number to search for.
+        :return: Returns the binary address or None if lineno is out of bounds.
+        """
+        self.CheckRebuild()
+        info = self._get_address_info_from_lineno(lineno)
+        if info is not None:
+            return info.address
+        return None
+
+
+
     # def _JumpToWord(self, word):
     #     ea = None
     #     if all(c in "x0123456789abcdefABCDEF" for c in word):
@@ -593,7 +619,7 @@ class ColorfulLineGenerator():
         return f"     {addr_str}  "
 
     @staticmethod
-    def GenerateMemoryLine(address, address_len, data_bytes, bytes_per_line=16, data_patch_indices: Optional[List[int]] = None) -> str:
+    def GenerateMemoryLine(address, address_len, data_bytes, bytes_per_line=16, data_patch_indices: Optional[List[int]] = None) -> Tuple[str, List[Tuple[int, int, int]]]:
         """
         Generates a colored memory dump line.
         Example: 0x00401000  48 83 EC 28 48 8B C4 48 | H. .(.H. .H
@@ -602,12 +628,15 @@ class ColorfulLineGenerator():
 
         hex_dump_parts = []
         ascii_dump_parts = []
+
+        hightlight_byte_indices: List[Tuple[int, int, int]] = []
         for i, byte_val in enumerate(data_bytes):
             hex_part = f"{byte_val:02X}"
 
             # Check if this byte is part of a patch
             if data_patch_indices and i in data_patch_indices:
-                hex_dump_parts.append(ida_lines.COLSTR(hex_part, ida_lines.SCOLOR_ERROR)) # Highlight changed bytes
+                hex_dump_parts.append(ida_lines.COLSTR(hex_part, ida_lines.SCOLOR_BINPREF)) # Highlight changed bytes
+                hightlight_byte_indices.append((BYTE_CHANGE_HIGHTLIGHT, 2 + address_len + 2 + 3 * i, 2))
             else:
                 hex_dump_parts.append(ida_lines.COLSTR(hex_part, ida_lines.SCOLOR_BINPREF)) # Default color
 
@@ -619,7 +648,7 @@ class ColorfulLineGenerator():
         hex_str = ' '.join(hex_dump_parts).ljust(bytes_per_line * 3 - 1)
         ascii_str = ''.join(ascii_dump_parts)
 
-        return f"{addr_str}  {hex_str} | {ascii_str}"
+        return f"{addr_str}  {hex_str} | {ascii_str}", hightlight_byte_indices
 
 
 
@@ -1107,8 +1136,44 @@ class TTE_MemoryViewer:
     title = "TimeTravelEmuMemoryViewer"
     BYTES_PER_LINE = 16 # How many bytes to display per line in the memory dump
 
+    class MemoryViewerHooks(ida_kernwin.UI_Hooks):
+        def __init__(self, viewer):
+            ida_kernwin.UI_Hooks.__init__(self)
+            self.viewer: AddressAwareCustomViewer = viewer
+
+            # 键: 行号 (int)
+            # 值: 列表，每个元素可以是 (颜色键) 或 (颜色键, 字符起始索引, 字符数量)
+            self.marked_bytes = {}
+            self.hook()
+
+        def get_lines_rendering_info(self, out, widget, rin):
+            # 只有当widget是我们的自定义视图时才应用着色
+            if widget == self.viewer.GetWidget():
+                for section_lines in rin.sections_lines:
+                    for line_info in section_lines:
+                        current_line_nr = ida_kernwin.place_t.as_simpleline_place_t(line_info.at).n
+                        current_address = self.viewer.GetAddressFromLineNo(current_line_nr)
+                        if current_address in self.marked_bytes:
+                            directives = self.marked_bytes[current_address]
+
+                            for directive in directives:
+                                e = ida_kernwin.line_rendering_output_entry_t(line_info)
+
+                                color, char_start_idx, char_count = directive
+                                e.bg_color = color
+                                e.cpx = char_start_idx
+                                e.nchars = char_count
+                                e.flags |= ida_kernwin.LROEF_CPS_RANGE
+
+                                out.entries.push_back(e)
+
+
     def __init__(self):
         self.viewer = AddressAwareCustomViewer()
+        self.hook: TTE_MemoryViewer.MemoryViewerHooks = self.MemoryViewerHooks(self.viewer)
+        self.hightlighting_bytes = self.hook.marked_bytes
+
+
         self.bitness = get_bitness()
         if self.bitness:
             self.addr_len = self.bitness // 4
@@ -1125,7 +1190,6 @@ class TTE_MemoryViewer:
         self.current_range_display_start: int = -1
         self.current_range_display_end: int = -1
 
-        self.hightlighting_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, address_idx, color),...]
 
 
     def InitViewer(self):
@@ -1278,17 +1342,9 @@ class TTE_MemoryViewer:
         self.memory_pages_list = sorted(memory_pages.items())
         self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state_id} ]")
 
-    def AddHighlightLine(self, address, address_idx, color):
-        self.hightlighting_lines.append((address, address_idx, color))
 
-    def HighlightLines(self):
-        for address, address_idx, color in self.hightlighting_lines:
-            self.viewer.EditLineColor(address, address_idx, None, color) # Set bgcolor
-
-    def ClearHighlightLines(self):
-        while len(self.hightlighting_lines) > 0:
-            address, address_idx, color = self.hightlighting_lines.pop()
-            self.viewer.EditLineColor(address, address_idx, None, None) # Clear bgcolor
+    def ClearHighlightBytes(self):
+        self.hightlighting_bytes.clear()
 
 
     def ApplyStatePatchesInViewer(self, mem_patch: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
@@ -1315,7 +1371,7 @@ class TTE_MemoryViewer:
             self.DisplayMemoryRange(self.current_range_display_start, self.current_range_display_end)
 
         # Clear previous highlights
-        self.ClearHighlightLines()
+        self.ClearHighlightBytes()
 
         # Apply mem_patch and add new highlights
         if mem_patch:
@@ -1348,7 +1404,7 @@ class TTE_MemoryViewer:
                     patch_indices_within_line = sorted(line_patches.keys())
 
                     # Regenerate the line with highlight colors
-                    new_line_text = ColorfulLineGenerator.GenerateMemoryLine(
+                    new_line_text, hightlight_bytes = ColorfulLineGenerator.GenerateMemoryLine(
                         line_start_addr,
                         self.addr_len,
                         line_data_bytes,
@@ -1356,7 +1412,8 @@ class TTE_MemoryViewer:
                         patch_indices_within_line
                     )
                     self.viewer.EditLine(line_start_addr, 0, DATA_LINE, new_line_text, None, None) # Background is handled by COLSTR now
-                    self.AddHighlightLine(line_start_addr, 0, CHANGE_HIGHLIGHT_COLOR) # Highlight the whole line
+                    self.hightlighting_bytes[line_start_addr] = hightlight_bytes
+
 
                 elif self.current_range_display_start <= line_start_addr < self.current_range_display_end:
                     temp_line_data = bytearray([0] * self.BYTES_PER_LINE)
@@ -1364,7 +1421,7 @@ class TTE_MemoryViewer:
                         if offset < self.BYTES_PER_LINE:
                             temp_line_data[offset : offset + len(byte_val)] = byte_val
 
-                    new_line_text = ColorfulLineGenerator.GenerateMemoryLine(
+                    new_line_text, hightlight_bytes = ColorfulLineGenerator.GenerateMemoryLine(
                         line_start_addr,
                         self.addr_len,
                         temp_line_data,
@@ -1372,10 +1429,8 @@ class TTE_MemoryViewer:
                         sorted(line_patches.keys())
                     )
                     self.viewer.AddLine(line_start_addr, DATA_LINE, new_line_text, bgcolor=CHANGE_HIGHLIGHT_COLOR, lazy=True)
-                    self.AddHighlightLine(line_start_addr, 0, CHANGE_HIGHLIGHT_COLOR)
+                    self.hightlighting_bytes[line_start_addr] = hightlight_bytes
 
-
-        self.HighlightLines() # Apply all collected highlights
         self.viewer.Refresh()
 
 
@@ -1391,7 +1446,6 @@ class TTE_MemoryViewer:
         assert self.memory_pages_list, "Memory pages data not loaded"
 
         self.viewer.ClearLines()
-        self.ClearHighlightLines() # Clear any old highlights as we're rebuilding everything
 
         current_addr = (range_start // self.BYTES_PER_LINE) * self.BYTES_PER_LINE # Align to line start
 
