@@ -1007,8 +1007,22 @@ class TTE_RegistersViewer:
 
     title = "TimeTravelEmuRegistersViewer"
 
+    class custviewer(ida_kernwin.simplecustviewer_t):
+        def __init__(self):
+            super().__init__()
+            self.dbl_click_callback = None
+
+        def SetDblChickCallback(self, callback):
+            self.dbl_click_callback = callback
+
+        def OnDblClick(self, shift):
+            if self.dbl_click_callback:
+                return self.dbl_click_callback(self)
+            return False
+
+
     def __init__(self):
-        self.viewer = ida_kernwin.simplecustviewer_t()
+        self.viewer = self.custviewer()
         self.bitness = get_bitness()
         if self.bitness:
             self.hex_len = self.bitness // 4
@@ -1021,13 +1035,17 @@ class TTE_RegistersViewer:
         self.regs_patch: Optional[List[str]] = None # Only SetRegsPatch() change this value.
 
 
-
     def InitViewer(self):
         self.viewer.Create(self.title)
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self.statusbar_label = QtWidgets.QLabel("State ID: N\\A")
 
         self._SetCustomViewerStatusBar()
+
+
+    def SetDblChickCallback(self, callback):
+        self.viewer.SetDblChickCallback(callback)
+
 
     def _SetCustomViewerStatusBar(self):
         # Remove original status bar
@@ -1479,17 +1497,19 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.registers_viewer.InitViewer()
         self.mempages_viewer.InitViewer()
 
+        self.SetDoubleClickCallback()
+
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:NextStateAction",
-                              self.DisplayNextState, "Next state", NEXT_STATE_ACTION_SHORTCUT))
+                              self.DisplayNextStateAction, "Next state", NEXT_STATE_ACTION_SHORTCUT))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:PrevStateAction",
-                              self.DisplayPrevState, "Previous state", PREV_STATE_ACTION_SHORTCUT))
+                              self.DisplayPrevStateAction, "Previous state", PREV_STATE_ACTION_SHORTCUT))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:StageInputAction",
-                              self.DisplayInputState, "Switch to input state", "S"))
+                              self.DisplayInputStateAction, "Switch to input state", "S"))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:ChooseStatesAction",
@@ -1505,7 +1525,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:ToggleFollowCurrentInstructionAction",
-                              self.ToggleFollowCurrentInstruction, "Toggle follow current instruction (F)", "F"))
+                              self.ToggleFollowCurrentInstructionAction, "Toggle follow current instruction (F)", "F"))
 
         self.mempages_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.mempages_viewer.title}:ChooseMemoryPagesAction",
@@ -1517,8 +1537,37 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
 
+    def SetDoubleClickCallback(self):
+        """
+        Set a double click callback for mempages_viewer to allow user to jump to address in disassembly_viewer.
 
+        """
 
+        def OnDblClickAction(custom_viewer: AddressAwareCustomViewer):
+            """
+            Action:
+                If user double click a address which has execute permission, jump to it in DisassemblyViewer
+                If user double click a address which only has read permission, jump to it in MemoryViewer
+            """
+            dblclick_word = custom_viewer.GetCurrentWord()
+            if not dblclick_word:
+                return False
+            ea = None
+            if all(c in "x0123456789abcdefABCDEF" for c in dblclick_word):
+                try:
+                    ea = int(dblclick_word,16) # word is a address
+                    if self.current_full_state:
+                        memory_pages_list: List[Tuple[int, int, bytearray]] = [(addr, perm, data) for addr, (perm, data) in self.current_full_state.memory_pages.items()]
+                        for start_addr, perm, data in memory_pages_list:
+                            if start_addr <= ea < start_addr + len(data) and perm & UC_PROT_EXEC:
+                                return self.disassembly_viewer.JumpTo(ea)
+                            elif start_addr <= ea < start_addr + len(data) and perm & UC_PROT_READ:
+                                return self.mempages_viewer.JumpTo(ea)
+                except ValueError:
+                    pass
+            return False
+
+        self.registers_viewer.SetDblChickCallback(OnDblClickAction)
 
 
     def OnCreate(self, form):
@@ -1531,14 +1580,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         for sub_chooser in self.subchooser_list:
             if sub_chooser:
                 sub_chooser.Close()
-
-
-    def ToggleFollowCurrentInstruction(self):
-        self.follow_current_instruction = not self.follow_current_instruction
-        idaapi.msg(f"Follow current instruction: {self.follow_current_instruction}\n")
-        # If toggled to True, jump to current instruction
-        if self.follow_current_instruction and self.current_full_state:
-            self.disassembly_viewer.JumpTo(self.current_full_state.instruction_address)
 
 
     def LoadESM(self, state_manager: EmuStateManager):
@@ -1581,25 +1622,25 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         main_layout.setContentsMargins(0, 0, 0, 0)
 
 
-    def DisplayNextState(self):
+    def DisplayNextStateAction(self):
         assert self.state_list is not None, "No state_list loaded"
         if self.current_state_idx < len(self.state_list) - 1:
             self.current_state_idx += 1
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
-        else:
-            idaapi.msg("Already at the last state.\n")
+        # else:
+        #     idaapi.msg("Already at the last state.\n")
 
 
-    def DisplayPrevState(self):
+    def DisplayPrevStateAction(self):
         assert self.state_list is not None, "No state_list loaded"
         if self.current_state_idx > 0:
             self.current_state_idx -= 1
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
-        else:
-            idaapi.msg("Already at the first state.\n")
+        # else:
+        #     idaapi.msg("Already at the first state.\n")
 
 
-    def DisplayInputState(self):
+    def DisplayInputStateAction(self):
         assert self.state_manager is not None, "No state_manager loaded"
         assert self.state_list is not None, "No state_list loaded"
 
@@ -1827,14 +1868,18 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.subchooser_list.append(self.diff_chooser)
 
 
+    def ToggleFollowCurrentInstructionAction(self):
+        self.follow_current_instruction = not self.follow_current_instruction
+        idaapi.msg(f"Follow current instruction: {self.follow_current_instruction}\n")
+        # If toggled to True, jump to current instruction
+        if self.follow_current_instruction and self.current_full_state:
+            self.disassembly_viewer.JumpTo(self.current_full_state.instruction_address)
+
 
     def RefreshSubviewers(self):
         self.subchooser_list = [subchooser for subchooser in self.subchooser_list if hasattr(subchooser, "is_available") and subchooser.is_available] # type: ignore
         for chooser in self.subchooser_list:
             chooser.Refresh()
-
-
-
 
 
     def SwitchStateDisplay(self, state_id: str):
