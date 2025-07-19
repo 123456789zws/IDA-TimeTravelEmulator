@@ -830,11 +830,11 @@ class TTE_DisassemblyViewer():
             self.viewer.EditLineColor(address, lineno, None)
 
 
-    def ApplyStatePatchesInViewer(self, mem_diff: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
+    def ApplyStatePatchesInViewer(self, mem_patch: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
         """
         Apply memory patches to the viewer and highlight the changed lines.
 
-        :param mem_diff: A list of tuples (address, value) representing the changed memory.
+        :param mem_patch: A list of tuples (address, value) representing the changed memory.
         :param page_diff: A sorted dictionary of memory pages, with keys as start addresses and values as tuples (change_mode, data).
                             change_mode: 1 - removed, 2 - added
         :return: None
@@ -857,8 +857,8 @@ class TTE_DisassemblyViewer():
             if need_rebuild:
                 self.DisplayMemoryRange(self.current_range_display_start, self.current_range_display_end)
 
-        if mem_diff:
-            for addr, value in mem_diff:
+        if mem_patch:
+            for addr, value in mem_patch:
                 if addr > self.current_range_display_start and addr < self.current_range_display_end:
                     addr_info = self.viewer.GetLine(addr, 0)
                     if addr_info is not None and addr_info.type == SINGLE_DATA_LINE:
@@ -991,7 +991,7 @@ class TTE_RegistersViewer:
         self.current_state_id: Optional[str] = None # Only SetRegisters() change this value.
 
         self.regs_values: Optional[Dict[str, int]] = None # Only SetRegisters() change this value.
-        self.regs_diff: Optional[List[str]] = None # Only SetRegsDiff() change this value.
+        self.regs_patch: Optional[List[str]] = None # Only SetRegsPatch() change this value.
 
 
 
@@ -1021,10 +1021,10 @@ class TTE_RegistersViewer:
         self._RefreshStatusBar(state_id)
 
 
-    def SetRegsDiff(self, state_id: str, regs_diff: Optional[Dict[str, int]]):
+    def SetRegsPatch(self, state_id: str, regs_patch: Optional[Dict[str, int]]):
         assert state_id == self.current_state_id
-        if regs_diff is not None:
-            self.regs_diff = list(regs_diff.keys())
+        if regs_patch is not None:
+            self.regs_patch = list(regs_patch.keys())
 
 
     def DisplayRegisters(self):
@@ -1036,7 +1036,7 @@ class TTE_RegistersViewer:
 
             line_bgcolor = None
 
-            if self.regs_diff is not None and reg_name in self.regs_diff:
+            if self.regs_patch is not None and reg_name in self.regs_patch:
                 line_bgcolor = changed_bgcolor
 
             line_text = ColorfulLineGenerator.GenerateRegisterLine(reg_name, reg_value, self.hex_len)
@@ -1104,10 +1104,10 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.current_state_id: Optional[str] = None # Only SwitchStateDisplay() can change this value.
         self.current_full_state: Optional[FullEmuState] = None # Only SwitchStateDisplay() can change this value.
 
-        self.current_diffs: Optional[Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]], Optional[SortedDict]]] = None
+        self.current_diffs: Optional[Tuple[Optional[Dict[str, Tuple[int, int]]], Optional[SortedDict], Optional[SortedDict]]] = None
 
         # configs
-        self.follow_current_instruction = True # False # Whether to follow the current instruction when switching states.
+        self.follow_current_instruction = False # True # Whether to follow the current instruction when switching states.
 
 
 
@@ -1152,6 +1152,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.PopulateForm()
 
 
+    def OnClose(self, form):
+        if self.states_chooser:
+            self.states_chooser.Close()
+        if self.memory_pages_chooser:
+            self.memory_pages_chooser.Close()
+        if self.diff_chooser:
+            self.diff_chooser.Close()
 
 
 
@@ -1351,14 +1358,18 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                     tte_log_err("Failed to get bitness")
 
             def OnInit(self):
-                regs_diff, mem_diff, page_diff = self.get_current_diff_func() # Optional[Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]], Optional[SortedDict]]]
+                regs_diff, mem_diff, page_diff = self.get_current_diff_func() # Optional[Tuple[Optional[Dict[str, int]], Optional[SortedDict], Optional[SortedDict]]]
                 self.items = []
                 if regs_diff:
-                    for reg_name, reg_val in regs_diff.items():
-                        self.items.append(["reg diffs", reg_name, f"0x{reg_val:X}"])
+                    for reg_name, (prev_reg_val, reg_val) in regs_diff.items():
+                        self.items.append(["reg diffs",
+                            reg_name,
+                            f"0x{prev_reg_val:0{self.hex_len}X} -> 0x{reg_val:0{self.hex_len}X}"])
                 if mem_diff:
-                    for addr, data in mem_diff:
-                        self.items.append(["mem diffs", f"0x{addr:0{self.hex_len}X}", f"0x{data.hex()}"])
+                    for addr, (prev_data, data) in mem_diff.items():
+                        self.items.append(["mem diffs",
+                            f"0x{addr:0{self.hex_len}X}",
+                            f"0x{prev_data.to_bytes(1, byteorder='big' if get_is_be() else 'little').hex()} -> 0x{data.to_bytes(1, byteorder='big' if get_is_be() else 'little').hex()}"])
                 if page_diff:
                     for addr, (mode, (perm, data)) in page_diff.items():
                         if mode == 2:
@@ -1406,27 +1417,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             self.diff_chooser.Refresh()
 
 
-    def _GetPreStateDiff(self, state_id: str) -> Tuple[Optional[Dict[str, int]], Optional[List[Tuple[int, bytes]]]]:
-        assert self.state_manager is not None, "No state_manager loaded"
-
-        regs_diff: Optional[Dict[str, int]] = None
-        mem_diff: Optional[List[Tuple[int, bytes]]] = None
-
-        entry = self.state_manager.get_state_change(state_id)
-        if not entry:
-            return regs_diff, mem_diff
-
-        regs_diff = entry[0]
-        mem_diff_from_entry = entry[1]
-
-        if mem_diff_from_entry:
-            mem_diff = []
-            for addr, data_len, data in mem_diff_from_entry:
-                for offset in range(data_len):
-                    mem_diff.append((addr + offset, data[offset:offset + 1]))
-        return regs_diff, mem_diff
-
-
     def SwitchStateDisplay(self, state_id: str, show_pre_state_diff = True):
         assert self.state_manager is not None, "No state_manager loaded"
         if state_id == self.current_state_id:
@@ -1438,32 +1428,36 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
         assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
 
-        regs_diff: Optional[Dict[str, int]] = None
-        mem_diff: Optional[List[Tuple[int, bytes]]] = None
+        regs_diff: Optional[Dict[str, Tuple[int, int]]] = None
+        mem_diff: Optional[SortedDict] = None
+
+        regs_patch: Optional[Dict[str, int]] = None
+        mem_patch: Optional[List[Tuple[int, bytes]]] = None
         page_diff: Optional[SortedDict] = None
 
-        # if target_state.prev_state_id == self.current_state_id:
-        #     regs_diff, mem_diff = self._GetPreStateDiff(state_id)
-        # elif self.current_full_state is not None:
         if self.current_full_state is not None:
             entry = self.state_manager.compare_states(self.current_full_state, target_full_state)
             if entry:
                 regs_diff = entry[0]
-                mem_diff = [(addr, data.to_bytes(1, byteorder='big' if get_is_be() else 'little')) for addr, (_, data) in entry[1].items()]
+                mem_diff = entry[1]
                 page_diff = entry[2]
+
+                regs_patch = {reg_name : reg_value for reg_name, (_, reg_value) in regs_diff.items()}
+                mem_patch = [(addr, data.to_bytes(1, byteorder='big' if get_is_be() else 'little')) for addr, (_, data) in mem_diff.items()]
+
         self.current_diffs = (regs_diff, mem_diff, page_diff)
 
 
         self.disassembly_viewer.ClearHighlightLines()
         self.disassembly_viewer.LoadState(state_id, target_full_state.instruction_address, target_full_state.memory_pages)
-        self.disassembly_viewer.ApplyStatePatchesInViewer(mem_diff, page_diff)
+        self.disassembly_viewer.ApplyStatePatchesInViewer(mem_patch, page_diff)
 
 
         if self.follow_current_instruction or self.current_state_id is None:
             self.disassembly_viewer.JumpTo(target_state.instruction_address)
 
         self.registers_viewer.SetRegisters(target_full_state.state_id, target_full_state.registers_map)
-        self.registers_viewer.SetRegsDiff(target_full_state.state_id, regs_diff)
+        self.registers_viewer.SetRegsPatch(target_full_state.state_id, regs_patch)
         self.registers_viewer.DisplayRegisters()
 
         self.current_full_state = target_full_state

@@ -1,3 +1,4 @@
+from unittest import result
 from traitlets import Instance
 import idaapi
 import ida_lines
@@ -208,14 +209,14 @@ def is_address_range_loaded(start_ea, end_ea) -> bool:
 
 
 
-def catch_dict_diff(
+def catch_dict_patch(
         base_dict: Dict[str, int],
         target_dict: Dict[str, int]
 ) -> Dict[str, int]:
     """
     Compare the two dictionaries and return different key-value pairs of target_dict relative to base_dict.
     Prerequisite: Two dictionaries have exactly the same set of keys.
-    The return value contains only key-value pairs whose values have changed.
+    Returns the key-value pair contains only the changed values.
     """
     return {key: target_dict[key] for key in base_dict if base_dict[key] != target_dict[key]}
 
@@ -230,7 +231,7 @@ def apply_dict_patch(
     return result
 
 
-def catch_bytes_diff(
+def catch_bytes_patch(
         base_bytes_dict: Dict[int, Tuple[int, bytearray]], #
         target_bytes_dict: Dict[int, Tuple[int, bytearray]]
 ) -> Tuple[Dict[int, Tuple[int, bytes]], Dict[int, Tuple[int, bytearray]]]:
@@ -1054,8 +1055,8 @@ class EmuStateManager():
         assert base_full_state is not None, "No full base state available for patch creation."
         assert isinstance(base_full_state, FullEmuState), "Base state is not a full state."
 
-        reg_patches = catch_dict_diff(base_full_state.registers_map, current_registers_map)
-        mem_bsdiff_patches,new_pages = catch_bytes_diff(base_full_state.memory_pages, current_memory_pages)
+        reg_patches = catch_dict_patch(base_full_state.registers_map, current_registers_map)
+        mem_bsdiff_patches,new_pages = catch_bytes_patch(base_full_state.memory_pages, current_memory_pages) # [ ] TODO support unmap pages in newer state
 
         new_state = HeavyPatchEmuState(new_state_id,
                                        self.last_state_id,
@@ -1087,7 +1088,7 @@ class EmuStateManager():
         assert base_full_state is not None, "No full base state available for patch creation."
         assert isinstance(base_full_state, FullEmuState), "Base state is not a full state."
 
-        reg_patches = catch_dict_diff(base_full_state.registers_map, current_registers_map)
+        reg_patches = catch_dict_patch(base_full_state.registers_map, current_registers_map)
 
         new_state = LightPatchEmuState(new_state_id,
                                        self.last_state_id,
@@ -1242,34 +1243,6 @@ class EmuStateManager():
             return state.registers_map
 
 
-    def get_state_change(self, target_state_id: str):
-        """
-        Get the memory and registers changes of a certain state compared to the previous state
-        As a light function, It only return the modified part between the current state and the previous state.
-        It does not compare the full state.
-
-        :param target_state_id: The ID of the target state.
-        :return: A tuple (regs_diff, mem_diff) representing the differences.
-                 regs_diff: Dict of changed registers in target_state relative to previous state.
-                 mem_diff: List of memory different from previous state to target_state.
-        """
-        target_state = self.get_state(target_state_id)
-        if not target_state:
-            tte_log_dbg(f"State not found")
-            return
-
-        prev_state = self.get_state(target_state.prev_state_id)
-        if not prev_state:
-            tte_log_dbg(f"prev state not found")
-            return
-
-        regs_diff = catch_dict_diff(self._get_regs_map(prev_state), self._get_regs_map(target_state))
-        mem_diff = target_state.memory_patches
-
-        return regs_diff, mem_diff
-
-
-
     def compare_states(self, state1: EmuState, state2: EmuState):
         """
         Compares any two EmuState objects (full or patch) and returns their differences.
@@ -1299,13 +1272,15 @@ class EmuStateManager():
             tte_log_warn(f"Could not generate full state for '{state2.state_id}'. Comparison aborted.")
             return
 
-        regs_diff: Dict[str, int] = catch_dict_diff(full_state1.registers_map, full_state2.registers_map)
-        if not regs_diff:
-            tte_log_dbg("No register differences found.")
-        else:
-            for reg_name, new_val in regs_diff.items():
-                old_val = full_state1.registers_map.get(reg_name, "N/A")
-                tte_log_dbg(f"  {reg_name}: 0x{old_val:X} -> 0x{new_val:X}")
+        regs_diff: Dict[str, Tuple[int, int]] = {}
+        def catch_regs_diff(regs_map1, regs_map2):
+            result: Dict[str, Tuple[int, int]] = {}
+            for reg_name in regs_map1:
+                if regs_map1[reg_name] != regs_map2[reg_name]:
+                    result[reg_name] = (regs_map1[reg_name], regs_map2[reg_name])
+                    tte_log_dbg(f"  {reg_name}: 0x{regs_map1[reg_name]:X} -> 0x{regs_map2[reg_name]:X}")
+            return result
+        regs_diff = catch_regs_diff(full_state1.registers_map, full_state2.registers_map)
 
         mem_diff = SortedDict()
         def catch_mem_diff(page_start_addr, bytes1: bytearray, bytes2: bytearray):
@@ -1313,7 +1288,7 @@ class EmuStateManager():
             for offset_addr, (b1, b2) in enumerate(zip(bytes1, bytes2)):
                 if b1 != b2:
                     tte_log_dbg(f"Memory difference found at 0x{page_start_addr + offset_addr:X}: 0x{b1:X} -> 0x{b2:X}")
-                    mem_diff[page_start_addr + offset_addr] = [b1, b2]
+                    mem_diff[page_start_addr + offset_addr] = (b1, b2)
 
         for page_start_addr in full_state1.memory_pages.keys() & full_state2.memory_pages.keys():
             catch_mem_diff(
