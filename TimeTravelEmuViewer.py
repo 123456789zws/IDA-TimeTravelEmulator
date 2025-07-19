@@ -1698,18 +1698,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         input_str = ida_kernwin.ask_str(self.current_state_id if self.current_state_id else "", 0, "Input state ID:")
         if input_str:
-            target_state_idx = next((i for i, (x, y) in enumerate(self.state_list) if x == input_str), -1)
-            if target_state_idx >= 0:
-                self.current_state_idx = target_state_idx
-                self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
-            else:
-                idaapi.warning("Input state ID not found")
+            self.SwitchState(input_str)
 
 
     def ChooseStatesAction(self):
 
         class StateChooser(ida_kernwin.Choose):
-            def __init__(self, title, state_list: List[Tuple[str, EmuState]], switch_state_display_func):
+            def __init__(self, title, state_list: List[Tuple[str, EmuState]], switch_state_func):
                 ida_kernwin.Choose.__init__(
                     self,
                     title,
@@ -1722,7 +1717,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                 self.is_available = True
 
                 self.state_list = state_list
-                self.switch_state_display_func = switch_state_display_func
+                self.switch_state_display_func = switch_state_func
 
 
             def OnInit(self):
@@ -1759,7 +1754,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             tte_log_dbg("No state_list loaded")
             return
 
-        self.states_chooser = StateChooser("State Chooser", self.state_list, self.SwitchStateDisplay)
+        self.states_chooser = StateChooser("State Chooser", self.state_list, self.SwitchState)
         self.states_chooser.Show()
         self.subchooser_list.append(self.states_chooser)
 
@@ -1932,6 +1927,14 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.subchooser_list = [subchooser for subchooser in self.subchooser_list if hasattr(subchooser, "is_available") and subchooser.is_available] # type: ignore
         for chooser in self.subchooser_list:
             chooser.Refresh()
+
+    def SwitchState(self, state_id: str):
+        assert self.state_list is not None, "No state_list loaded"
+        target_state_idx = next((i for i, (x, y) in enumerate(self.state_list) if x == state_id), -1)
+        if target_state_idx >= 0:
+            self.current_state_idx = target_state_idx
+            self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
+        self.SwitchStateDisplay(state_id)
 
 
     def SwitchStateDisplay(self, state_id: str):
