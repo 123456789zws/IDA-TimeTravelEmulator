@@ -402,7 +402,7 @@ def tte_log_err(message):
 
 @dataclass
 class EmuSettings():
-    start = 0x7FF7C6491450#start#0x140001450#
+    start = 0x7FF73DCA1450#start#0x140001450#
     end = -1#0x14000201C#end#
     # emulate_step_limit = 10
     is_load_registers = False

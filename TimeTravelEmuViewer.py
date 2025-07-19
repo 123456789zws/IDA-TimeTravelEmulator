@@ -2,6 +2,7 @@ import bisect
 import re
 
 from exceptiongroup import catch
+from httpx import get
 from sortedcontainers.sorteddict import SortedDict
 from TimeTravelEmulator import EmuState
 import idaapi
@@ -594,6 +595,34 @@ class ColorfulLineGenerator():
         addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}  {error_msg}", ida_lines.SCOLOR_ERROR)
         return f"     {addr_str}  "
 
+    @staticmethod
+    def GenerateMemoryLine(address, address_len, data_bytes, bytes_per_line=16, data_patch_indices: Optional[List[int]] = None) -> str:
+        """
+        Generates a colored memory dump line.
+        Example: 0x00401000  48 83 EC 28 48 8B C4 48 | H. .(.H. .H
+        """
+        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
+
+        hex_dump_parts = []
+        ascii_dump_parts = []
+        for i, byte_val in enumerate(data_bytes):
+            hex_part = f"{byte_val:02X}"
+
+            # Check if this byte is part of a patch
+            if data_patch_indices and i in data_patch_indices:
+                hex_dump_parts.append(ida_lines.COLSTR(hex_part, ida_lines.SCOLOR_ERROR)) # Highlight changed bytes
+            else:
+                hex_dump_parts.append(ida_lines.COLSTR(hex_part, ida_lines.SCOLOR_BINPREF)) # Default color
+
+            if 0x20 <= byte_val <= 0x7E:
+                ascii_dump_parts.append(chr(byte_val))
+            else:
+                ascii_dump_parts.append('.')
+
+        hex_str = ' '.join(hex_dump_parts).ljust(bytes_per_line * 3 - 1)
+        ascii_str = ''.join(ascii_dump_parts)
+
+        return f"{addr_str}  {hex_str} | {ascii_str}"
 
 
 
@@ -799,7 +828,6 @@ class TTE_DisassemblyViewer():
         self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Memory Range: N\\A )")
         viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
 
-        viewer_status_bar.addPermanentWidget(QtWidgets.QLabel("Model: normal"))
 
 
     def LoadListFromESM(self, state_list: List[Tuple[str, EmuState]]):
@@ -980,6 +1008,8 @@ class TTE_RegistersViewer:
     4. call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
+    title = "TimeTravelEmuRegisters"
+
     def __init__(self):
         self.viewer = ida_kernwin.simplecustviewer_t()
         self.bitness = get_bitness()
@@ -996,7 +1026,7 @@ class TTE_RegistersViewer:
 
 
     def InitViewer(self):
-        self.viewer.Create("TimeTravelEmuRegisters")
+        self.viewer.Create(self.title)
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self.statusbar_label = QtWidgets.QLabel("State ID: N\\A")
 
@@ -1047,26 +1077,365 @@ class TTE_RegistersViewer:
 
 
 
-
-
-
 class TTE_MemoryViewer:
+    """
+    A subviewer class of TimeTravelEmuViewer to display memory.
+
+    To use it, follow these steps:
+    1. Use self.InitViewer() to initialize the viewer.
+    2. Use self.LoadState() to load memory pages for a specific state.
+    3. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    4. Use self.DisplayMemoryRange() to display a specific memory range.
+    5. Call TimeTravelEmuViewer.Show() to show the viewer with this subviewer.
+    """
+
+    title = "TimeTravelEmuMemory"
+    BYTES_PER_LINE = 16 # How many bytes to display per line in the memory dump
+
     def __init__(self):
-        self.viewer = ida_kernwin.simplecustviewer_t()
+        self.viewer = AddressAwareCustomViewer()
+        self.bitness = get_bitness()
+        if self.bitness:
+            self.addr_len = self.bitness // 4
+        else:
+            tte_log_err("Failed to get bitness")
+        self.is_be = get_is_be()
+
+        self.statusbar_state_id_qlabel: Optional[QtWidgets.QLabel] = None
+        self.statusbar_memory_range_qlabel: Optional[QtWidgets.QLabel] = None
+
+        self.current_state_id: Optional[str] = None
+        self.memory_pages_list: Optional[List[Tuple[int, Tuple[int, bytearray]]]] = None # Sorted list of (start_addr, (perm, data))
+
+        self.current_range_display_start: int = -1
+        self.current_range_display_end: int = -1
+
+        self.hightlighting_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, address_idx, color),...]
 
 
     def InitViewer(self):
-        self.viewer.Create("TimeTravelEmuRegisters")
+        self.viewer.Create(self.title)
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
+        self._SetCustomViewerStatusBar()
+        self._SetDoubleClickCallback()
+        self._SetMenuActions()
+
+    def _SetDoubleClickCallback(self):
+        def OnDblClickAction(custom_viewer: AddressAwareCustomViewer):
+            """
+            Action: If user double-clicks an address, jump to it in IDA View.
+            """
+            addr = custom_viewer.GetLineNo() # Get the address of the clicked line
+            if addr is not None and addr != idaapi.BADADDR:
+                return idaapi.jumpto(addr)
+            return False
+
+        self.viewer.SetDblChickCallback(OnDblClickAction)
+
+    def _SetMenuActions(self):
+        self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
+                              f"{self.title}:RefreshAction",
+                              self.RefreshAction, "Refresh", ""))
+        self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
+                              f"{self.title}:JumpAction",
+                              self.InputJumpAction, "Jump to address", "G"))
+        self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
+                              f"{self.title}:SetMemoryRangeAction",
+                              self.SetDisplayMemoryRangeAction, "Set memory range", "R"))
+
+    def AddMenuActions(self, action_handler: MenuActionHandler):
+        action_handler.parent_title = self.title
+        self.viewer.AddAction(action_handler)
+
+    def ClearLines(self):
+        self.viewer.ClearLines()
+        self.current_range_display_start = -1
+        self.current_range_display_end = -1
+
+    def JumpTo(self, address):
+        """
+        Jumps to the given address in the memory viewer.
+        If the address is not within the current display range, it will try to load a page around it.
+        """
+        assert self.memory_pages_list, "Memory pages data not loaded"
+
+        # Check if the address is already within the currently displayed range
+        if self.current_range_display_start <= address < self.current_range_display_end:
+            self.viewer.Jump(address)
+            return
+
+        # Find the page containing the address
+        idx = bisect.bisect_right([entry[0] for entry in self.memory_pages_list], address) - 1
+
+        if idx >= 0:
+            page_start_addr, _ = self.memory_pages_list[idx]
+            if page_start_addr <= address < page_start_addr + PAGE_SIZE:
+                # Address is within a known page, display that page
+                self.DisplayMemoryRange(page_start_addr, page_start_addr + PAGE_SIZE)
+                self.viewer.Jump(address)
+                return
+
+        # If the address is not in any known page, or idx is -1,
+        # try to display a default PAGE_SIZE block centered/starting at the address.
+        # Align to page boundary for display consistency.
+        start_display_addr = (address // self.BYTES_PER_LINE) * self.BYTES_PER_LINE
+        end_display_addr = start_display_addr + PAGE_SIZE # Display one page size for context
+        idaapi.warning(f"Target address 0x{address:X} not loaded in any known memory page. Displaying a default range 0x{start_display_addr:X}-0x{end_display_addr:X}.")
+        self.DisplayMemoryRange(start_display_addr, end_display_addr)
+        self.viewer.Jump(address)
 
 
+    def RefreshAction(self):
+        self.DisplayMemoryRange(self.current_range_display_start, self.current_range_display_end)
 
 
+    def InputJumpAction(self):
+        n = self.viewer.GetLineNo()
+        current_addr = n if n is not None else 0
+        target_addr = ida_kernwin.ask_addr(current_addr, "Jump to address in Memory View")
+        if target_addr is not None and target_addr != idaapi.BADADDR:
+            self.JumpTo(target_addr)
+        return None
 
 
+    def SetDisplayMemoryRangeAction(self):
+        assert self.memory_pages_list, "Memory pages data not loaded"
+
+        class RangeInputForm(idaapi.Form):
+            def __init__(self, start_addr, end_addr):
+                self.start_addr = start_addr
+                self.end_addr = end_addr
+
+                self.RangeStart: Optional[ida_kernwin.Form.NumericInput]  = None
+                self.RangeEnd: Optional[ida_kernwin.Form.NumericInput] = None
+                super().__init__(
+                r'''
+                {FormChangeCb}
+                <Range Start: {RangeStart}> | <Range End: {RangeEnd}>
+                ''',
+                {
+                "FormChangeCb": self.FormChangeCb(self.OnFormChange),
+                "RangeStart": self.NumericInput(value = self.start_addr, swidth = 30),
+                "RangeEnd": self.NumericInput(value = self.end_addr, swidth = 30),
+                }
+                )
+                self.Compile()
+
+            def OnFormChange(self,fid):
+                assert self.RangeStart and self.RangeEnd
+                if fid == self.RangeStart.id or fid == self.RangeEnd.id:
+                    self.start_addr = self.GetControlValue(self.RangeStart)
+                    self.end_addr = self.GetControlValue(self.RangeEnd)
+                return 1
+
+        # Use current display range as default for the input form
+        form = RangeInputForm(self.current_range_display_start, self.current_range_display_end)
+        IsSet = form.Execute()
+        if IsSet is not None:
+            range_start = form.start_addr
+            range_end = form.end_addr
+            self.DisplayMemoryRange(range_start, range_end)
+        form.Free()
+
+    def _SetCustomViewerStatusBar(self):
+        viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
+        if not viewer_status_bar:
+            # Create a new status bar if it doesn't exist (e.g., if simplecustviewer_t doesn't create one by default)
+            viewer_status_bar = QtWidgets.QStatusBar()
+            self.viewer_widegt.layout().addWidget(viewer_status_bar) # Assuming a layout exists
+
+        # Clear existing widgets from status bar
+        for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
+            viewer_status_bar.removeWidget(widget)
+
+        self.statusbar_state_id_qlabel = QtWidgets.QLabel("[State: N\\A ]")
+        viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
+        self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Mem: N\\A )")
+        viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
+
+    def LoadState(self, state_id: str, memory_pages: Dict[int, Tuple[int, bytearray]]):
+        """
+        Loads the memory state for display.
+        """
+        assert self.statusbar_state_id_qlabel, "Status bar not initialized"
+        self.current_state_id = state_id
+        # Convert the dictionary to a sorted list of (address, (perm, data)) for efficient iteration
+        self.memory_pages_list = sorted(memory_pages.items())
+        self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state_id} ]")
+
+    def AddHighlightLine(self, address, address_idx, color):
+        self.hightlighting_lines.append((address, address_idx, color))
+
+    def HighlightLines(self):
+        for address, address_idx, color in self.hightlighting_lines:
+            self.viewer.EditLineColor(address, address_idx, None, color) # Set bgcolor
+
+    def ClearHighlightLines(self):
+        while len(self.hightlighting_lines) > 0:
+            address, address_idx, color = self.hightlighting_lines.pop()
+            self.viewer.EditLineColor(address, address_idx, None, None) # Clear bgcolor
 
 
-# from TimeTravelEmulator import EmuStateManager
+    def ApplyStatePatchesInViewer(self, mem_patch: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
+        """
+        Applies memory patches and highlights changed memory in the viewer.
+
+        :param mem_patch: A list of tuples (address, value) representing the changed memory bytes.
+        :param page_diff: A sorted dictionary of memory pages, with keys as start addresses and values as tuples (change_mode, data).
+                            change_mode: 1 - removed, 2 - added
+        """
+        assert self.memory_pages_list, "Memory pages data not loaded"
+
+        # Check if a full rebuild is needed due to page additions/removals
+        need_rebuild_for_page_changes = False
+        if page_diff:
+            for start_addr, (change_mode, data) in page_diff.items():
+                if (start_addr < self.current_range_display_end and
+                    start_addr + PAGE_SIZE > self.current_range_display_start):
+                    need_rebuild_for_page_changes = True
+                    break
+
+        if need_rebuild_for_page_changes:
+            # Re-display the entire range if pages were added or removed within it
+            self.DisplayMemoryRange(self.current_range_display_start, self.current_range_display_end)
+
+        # Clear previous highlights
+        self.ClearHighlightLines()
+
+        # Apply mem_patch and add new highlights
+        if mem_patch:
+            # Group patches by the start of their display lines
+            patches_by_line_start: Dict[int, Dict[int, bytes]] = defaultdict(dict)
+            for addr, value_bytes in mem_patch:
+                line_start_addr = (addr // self.BYTES_PER_LINE) * self.BYTES_PER_LINE
+                offset_within_line = addr % self.BYTES_PER_LINE
+                # Store the change, potentially as a single byte
+                for i, byte_val in enumerate(value_bytes):
+                    patches_by_line_start[line_start_addr][offset_within_line + i] = byte_val.to_bytes(1, byteorder='big' if self.is_be else 'little')
+
+            for line_start_addr, line_patches in patches_by_line_start.items():
+                line_info = self.viewer.GetLine(line_start_addr, 0) # Assuming address_idx 0 for memory lines
+
+                if line_info:
+                    # Get the raw bytes for the line from the current memory state
+                    # This requires searching the memory_pages_list for the relevant page
+                    line_data_bytes = bytearray(self.BYTES_PER_LINE) # Default empty bytes
+                    for page_addr, (perm, page_data) in self.memory_pages_list:
+                        if page_addr <= line_start_addr < page_addr + PAGE_SIZE:
+                            # Calculate offset into page_data
+                            offset_in_page = line_start_addr - page_addr
+                            # Get the relevant chunk, clamp to page boundary
+                            chunk_len = min(self.BYTES_PER_LINE, PAGE_SIZE - offset_in_page)
+                            line_data_bytes = bytearray(page_data[offset_in_page : offset_in_page + chunk_len])
+                            break
+
+                    # Identify indices within line_data_bytes that were patched
+                    patch_indices_within_line = sorted(line_patches.keys())
+
+                    # Regenerate the line with highlight colors
+                    new_line_text = ColorfulLineGenerator.GenerateMemoryLine(
+                        line_start_addr,
+                        self.addr_len,
+                        line_data_bytes,
+                        self.BYTES_PER_LINE,
+                        patch_indices_within_line
+                    )
+                    self.viewer.EditLine(line_start_addr, 0, DATA_LINE, new_line_text, None, None) # Background is handled by COLSTR now
+                    self.AddHighlightLine(line_start_addr, 0, CHANGE_HIGHLIGHT_COLOR) # Highlight the whole line
+
+                elif self.current_range_display_start <= line_start_addr < self.current_range_display_end:
+                    temp_line_data = bytearray([0] * self.BYTES_PER_LINE)
+                    for offset, byte_val in line_patches.items():
+                        if offset < self.BYTES_PER_LINE:
+                            temp_line_data[offset : offset + len(byte_val)] = byte_val
+
+                    new_line_text = ColorfulLineGenerator.GenerateMemoryLine(
+                        line_start_addr,
+                        self.addr_len,
+                        temp_line_data,
+                        self.BYTES_PER_LINE,
+                        sorted(line_patches.keys())
+                    )
+                    self.viewer.AddLine(line_start_addr, DATA_LINE, new_line_text, bgcolor=CHANGE_HIGHLIGHT_COLOR, lazy=True)
+                    self.AddHighlightLine(line_start_addr, 0, CHANGE_HIGHLIGHT_COLOR)
+
+
+        self.HighlightLines() # Apply all collected highlights
+        self.viewer.Refresh()
+
+
+    def DisplayMemoryRange(self, range_start, range_end):
+        """
+        Displays a specified memory range in the viewer.
+        This function clears the current view and repopulates it.
+
+        :param range_start: The starting address of the range to display.
+        :param range_end: The ending address (exclusive) of the range to display.
+        """
+        assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
+        assert self.memory_pages_list, "Memory pages data not loaded"
+
+        self.viewer.ClearLines()
+        self.ClearHighlightLines() # Clear any old highlights as we're rebuilding everything
+
+        current_addr = (range_start // self.BYTES_PER_LINE) * self.BYTES_PER_LINE # Align to line start
+
+        # Track the actual displayed range for the status bar
+        actual_display_start = -1
+        actual_display_end = -1
+
+        # Iterate through the requested display range, line by line
+        while current_addr < range_end:
+            line_data = bytearray(self.BYTES_PER_LINE)
+            has_data = False
+
+            # Find which memory page(s) contain the current line
+            page_found_for_line = False
+            for page_start_addr, (perm, page_content) in self.memory_pages_list:
+                if page_start_addr <= current_addr < page_start_addr + PAGE_SIZE:
+                    # This page contains part of the current line
+                    page_found_for_line = True
+
+                    # Calculate relevant offsets and lengths
+                    offset_in_page = current_addr - page_start_addr
+                    bytes_to_copy = min(self.BYTES_PER_LINE, PAGE_SIZE - offset_in_page)
+
+                    # Copy data from the memory page into line_data
+                    line_data[0:bytes_to_copy] = page_content[offset_in_page : offset_in_page + bytes_to_copy]
+                    has_data = True
+
+                    # Update actual displayed range
+                    if actual_display_start == -1:
+                        actual_display_start = current_addr
+                    actual_display_end = current_addr + self.BYTES_PER_LINE
+                    break # Assuming one page fully covers or starts the line
+
+            if not page_found_for_line:
+                # If no page covers this address range, it's unknown/unmapped memory
+                # line_data remains all zeros (initialized as such)
+                pass # Already initialized as zeros.
+
+            line_text = ColorfulLineGenerator.GenerateMemoryLine(
+                current_addr,
+                self.addr_len,
+                line_data,
+                self.BYTES_PER_LINE
+            )
+            self.viewer.AddLine(current_addr, DATA_LINE, line_text) # Use DATA_LINE for generic memory view
+
+            current_addr += self.BYTES_PER_LINE
+
+        self.current_range_display_start = range_start
+        self.current_range_display_end = range_end
+
+        # Update status bar
+        display_range_text = f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})"
+        if actual_display_start != -1:
+            display_range_text += f" (Loaded: 0x{actual_display_start:0{self.addr_len}X} ~ 0x{actual_display_end:0{self.addr_len}X})"
+        self.statusbar_memory_range_qlabel.setText(display_range_text)
+
+        self.viewer.Refresh()
+
 
 
 
@@ -1085,6 +1454,8 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
     def __init__(self):
         super().__init__()
+        self.is_be = get_is_be()
+
 
         self.disassembly_viewer: TTE_DisassemblyViewer =  TTE_DisassemblyViewer()
         self.registers_viewer: TTE_RegistersViewer = TTE_RegistersViewer()
@@ -1140,11 +1511,11 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                               f"{self.title}:ShowDiffAction",
                               self.ShowDiffsAciton,   "Show diff", "D"))
 
+        # Add "Follow Current Instruction" action to the main viewer
+        self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.title}:ToggleFollowCurrentInstructionAction",
+                              self.ToggleFollowCurrentInstruction, "Toggle follow current instruction (F)", "F"))
 
-
-        # self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
-        #                       f"{self.title}:FollowCurrentInstructionAction",
-        #                       self.ToggleFollowCurrentInstruction, "Toggle follow current instruction", "F"))
 
     def OnCreate(self, form):
         self.parent = self.FormToPyQtWidget(form)
@@ -1161,6 +1532,12 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             self.diff_chooser.Close()
 
 
+    def ToggleFollowCurrentInstruction(self):
+        self.follow_current_instruction = not self.follow_current_instruction
+        idaapi.msg(f"Follow current instruction: {self.follow_current_instruction}\n")
+        # If toggled to True, jump to current instruction
+        if self.follow_current_instruction and self.current_full_state:
+            self.disassembly_viewer.JumpTo(self.current_full_state.instruction_address)
 
 
     def LoadESM(self, state_manager: EmuStateManager):
@@ -1172,10 +1549,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.state_list = self.state_manager.get_state_list()
 
-        self.disassembly_viewer.LoadListFromESM(self.state_list);
+        self.disassembly_viewer.LoadListFromESM(self.state_list)
 
         self.current_state_idx = 0
-        self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
+        if self.state_list:
+            self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
+        else:
+            idaapi.warning("No states loaded from EmuStateManager.")
 
 
 
@@ -1205,6 +1585,8 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         if self.current_state_idx < len(self.state_list) - 1:
             self.current_state_idx += 1
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
+        else:
+            idaapi.msg("Already at the last state.\n")
 
 
     def DisplayPrevState(self):
@@ -1212,13 +1594,15 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         if self.current_state_idx > 0:
             self.current_state_idx -= 1
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
+        else:
+            idaapi.msg("Already at the first state.\n")
 
 
     def DisplayInputState(self):
         assert self.state_manager is not None, "No state_manager loaded"
         assert self.state_list is not None, "No state_list loaded"
 
-        input_str = ida_kernwin.ask_str(self.current_state_id, 0, "Input state ID:")
+        input_str = ida_kernwin.ask_str(self.current_state_id if self.current_state_id else "", 0, "Input state ID:")
         if input_str:
             target_state_idx = next((i for i, (x, y) in enumerate(self.state_list) if x == input_str), -1)
             if target_state_idx >= 0:
@@ -1246,7 +1630,10 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
             def OnInit(self):
-                self.items = [ [str(i), state_id, InstrctionParser().parse_instruction(state.instruction)] for i, (state_id, state) in enumerate(self.state_list) ]
+                self.items = [[str(i),
+                        state_id,
+                        InstrctionParser().parse_instruction(state.instruction)]
+                        for i, (state_id, state) in enumerate(self.state_list)]
                 return True
 
             def OnGetSize(self):
@@ -1280,7 +1667,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
     def ChooseMemoryPagesAction(self):
 
         class MemPageChooser(ida_kernwin.Choose):
-            def __init__(self, title, get_current_full_state_func, display_memory_range_func):
+            def __init__(self, title, get_current_full_state_func, display_memory_range_func_disasm, display_memory_range_func_mem):
                 ida_kernwin.Choose.__init__(
                     self,
                     title,
@@ -1292,22 +1679,28 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                         ["size", 10 | ida_kernwin.Choose.CHCOL_HEX],
                     ])
                 self.get_current_full_state_func = get_current_full_state_func
-                self.display_memory_range_func = display_memory_range_func
+                self.display_memory_range_func_disasm = display_memory_range_func_disasm
+                self.display_memory_range_func_mem = display_memory_range_func_mem
                 self.bitness = get_bitness()
                 if self.bitness:
                     self.hex_len = self.bitness // 4
                 else:
                     tte_log_err("Failed to get bitness")
+                self.items = [] # Initialize items list
 
             def OnInit(self):
-                memory_pages_list: List[Tuple[int, int, bytearray]] = [(addr, perm, data) for addr, (perm, data) in self.get_current_full_state_func().memory_pages.items()]
-                self.items = [[
-                                f"0x{addr:0{self.hex_len}X}",
-                                "R" if perm & UC_PROT_READ else " ",
-                                "W" if perm & UC_PROT_WRITE else " ",
-                                "X" if perm & UC_PROT_EXEC else " ",
-                                f"0x{len(data):X}"]
-                                for addr, perm, data in memory_pages_list]
+                full_state = self.get_current_full_state_func()
+                if full_state:
+                    memory_pages_list: List[Tuple[int, int, bytearray]] = [(addr, perm, data) for addr, (perm, data) in full_state.memory_pages.items()]
+                    self.items = [[
+                                    f"0x{addr:0{self.hex_len}X}",
+                                    "R" if perm & UC_PROT_READ else " ",
+                                    "W" if perm & UC_PROT_WRITE else " ",
+                                    "X" if perm & UC_PROT_EXEC else " ",
+                                    f"0x{len(data):X}"]
+                                    for addr, perm, data in memory_pages_list]
+                else:
+                    self.items = [] # No state, no items
                 return True
 
             def OnGetSize(self):
@@ -1322,7 +1715,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             def OnSelectLine(self, n):
                 addr = int(self.items[n][0], 16)
                 size = int(self.items[n][4], 16)
-                self.display_memory_range_func(addr, addr + size)
+
+                # Jump in Disassembly View
+                self.display_memory_range_func_disasm(addr, addr + size)
+
+                # Jump in Memory View
+                self.display_memory_range_func_mem(addr, addr + size)
+
                 return ida_kernwin.Choose.NOTHING_CHANGED
 
             def OnRefresh(self, n):
@@ -1333,13 +1732,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             tte_log_dbg("No current full state")
             return
 
-        self.memory_pages_chooser = MemPageChooser("Memory Page Chooser", lambda : self.current_full_state, self.disassembly_viewer.DisplayMemoryRange)
+        self.memory_pages_chooser = MemPageChooser("Memory Page Chooser", lambda : self.current_full_state, self.disassembly_viewer.DisplayMemoryRange, self.mempages_viewer.DisplayMemoryRange)
         self.memory_pages_chooser.Show()
 
     def ShowDiffsAciton(self):
 
         class DiffsChooser(ida_kernwin.Choose):
-            def __init__(self, title, get_current_diff_func, jumpto_address_func):
+            def __init__(self, title, get_current_diff_func, jumpto_address_func_disasm, jumpto_address_func_mem):
                 ida_kernwin.Choose.__init__(
                     self,
                     title,
@@ -1351,12 +1750,14 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                      ])
 
                 self.get_current_diff_func = get_current_diff_func
-                self.jumpto_address_func = jumpto_address_func
+                self.jumpto_address_func_disasm = jumpto_address_func_disasm
+                self.jumpto_address_func_mem = jumpto_address_func_mem
                 self.bitness = get_bitness()
                 if self.bitness:
                     self.hex_len = self.bitness // 4
                 else:
                     tte_log_err("Failed to get bitness")
+                self.items = [] # Initialize items list
 
             def OnInit(self):
                 regs_diff, mem_diff, page_diff = self.get_current_diff_func() # Optional[Tuple[Optional[Dict[str, int]], Optional[SortedDict], Optional[SortedDict]]]
@@ -1368,15 +1769,17 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                             f"0x{prev_reg_val:0{self.hex_len}X} -> 0x{reg_val:0{self.hex_len}X}"])
                 if mem_diff:
                     for addr, (prev_data, data) in mem_diff.items():
+                        # mem_diff stores single byte changes
                         self.items.append(["mem diffs",
                             f"0x{addr:0{self.hex_len}X}",
-                            f"0x{prev_data.to_bytes(1, byteorder='big' if get_is_be() else 'little').hex()} -> 0x{data.to_bytes(1, byteorder='big' if get_is_be() else 'little').hex()}"])
+                            f"0x{prev_data:02X} -> 0x{data:02X}"]) # prev_data and data are int for single bytes
                 if page_diff:
-                    for addr, (mode, (perm, data)) in page_diff.items():
-                        if mode == 2:
-                            self.items.append(["add page", f"0x{addr:0{self.hex_len}X}", f"perm: 0x{perm:X}"])
-                        elif mode == 1:
-                            self.items.append(["del page", f"0x{addr:0{self.hex_len}X}", f"perm: 0x{perm:X}"])
+                    for addr, (mode, (perm, data)) in page_diff.items(): # data here is bytearray for the whole page
+                        if mode == 2: # Added page
+                            self.items.append(["add page", f"0x{addr:0{self.hex_len}X}", f"perm: 0x{perm:X}, size: 0x{len(data):X}"])
+                        elif mode == 1: # Removed page
+                            self.items.append(["del page", f"0x{addr:0{self.hex_len}X}", f"perm: 0x{perm:X}, size: 0x{len(data):X}"])
+                return True
 
             def OnGetSize(self):
                 return len(self.items)
@@ -1387,14 +1790,16 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             def OnGetLine(self, n):
                 return self.items[n]
 
-            def OnSelectLine(self, n):
-                locate = self.items[n][1]
-                if locate.startswith("0x"):
-                    try:
-                        addr = int(locate, 16)
-                        self.jumpto_address_func(addr)
-                    except:
-                        pass
+            def OnSelectLine(self, n, selected_multiple):
+                if not selected_multiple:
+                    locate = self.items[n][1]
+                    if locate.startswith("0x"):
+                        try:
+                            addr = int(locate, 16)
+                            self.jumpto_address_func_disasm(addr) # Jump in disassembly view
+                            self.jumpto_address_func_mem(addr)    # Jump in memory view
+                        except ValueError:
+                            pass # Not a valid address
                 return ida_kernwin.Choose.NOTHING_CHANGED
 
             def OnRefresh(self, n):
@@ -1403,8 +1808,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         if self.state_list is None:
             tte_log_dbg("No state_list loaded")
+            return
 
-        self.diff_chooser = DiffsChooser("Diffs Chooser", lambda : self.current_diffs, self.disassembly_viewer.JumpTo)
+        self.diff_chooser = DiffsChooser("Diffs Chooser", lambda : self.current_diffs, self.disassembly_viewer.JumpTo, self.mempages_viewer.JumpTo)
         self.diff_chooser.Show()
 
 
@@ -1418,60 +1824,79 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             self.diff_chooser.Refresh()
 
 
-    def SwitchStateDisplay(self, state_id: str, show_pre_state_diff = True):
+    def SwitchStateDisplay(self, state_id: str):
         assert self.state_manager is not None, "No state_manager loaded"
-        if state_id == self.current_state_id:
+
+        # Avoid unnecessary re-rendering if already on this state
+        if state_id == self.current_state_id and self.current_full_state is not None:
             return
 
         target_state = self.state_manager.get_state(state_id)
-        assert target_state is not None, f"State {state_id} not found in state_manager"
+        if target_state is None:
+            idaapi.warning(f"State {state_id} not found in state_manager.")
+            return
 
         target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
-        assert target_full_state is not None, f"Failed to generate full state for state {state_id}"
+        if target_full_state is None:
+            idaapi.warning(f"Failed to generate full state for state {state_id}.")
+            return
 
         regs_diff: Optional[Dict[str, Tuple[int, int]]] = None
-        mem_diff: Optional[SortedDict] = None
+        mem_diff: Optional[SortedDict] = None # SortedDict[address, (prev_value, new_value)] (single byte)
+        page_diff: Optional[SortedDict] = None # SortedDict[page_start_addr, (change_mode, (perm, data))]
 
         regs_patch: Optional[Dict[str, int]] = None
-        mem_patch: Optional[List[Tuple[int, bytes]]] = None
-        page_diff: Optional[SortedDict] = None
+        mem_patch: Optional[List[Tuple[int, bytes]]] = None # List of (address, value_bytes) for changed memory regions
 
         if self.current_full_state is not None:
             entry = self.state_manager.compare_states(self.current_full_state, target_full_state)
             if entry:
                 regs_diff = entry[0]
-                mem_diff = entry[1]
+                mem_diff_raw = entry[1] # This is SortedDict[address, (prev_int, new_int)]
                 page_diff = entry[2]
 
                 regs_patch = {reg_name : reg_value for reg_name, (_, reg_value) in regs_diff.items()}
-                mem_patch = [(addr, data.to_bytes(1, byteorder='big' if get_is_be() else 'little')) for addr, (_, data) in mem_diff.items()]
+
+                # Convert raw mem_diff (single int bytes) to mem_patch (addr, bytes)
+                if mem_diff_raw:
+                    mem_patch = [(addr, new_val.to_bytes(1, byteorder='big' if get_is_be() else 'little')) for addr, (_, new_val) in mem_diff_raw.items()]
+                    # Reconstruct mem_diff for DiffsChooser as SortedDict[addr, (prev_int, new_int)]
+                    mem_diff = mem_diff_raw
+                else:
+                    mem_patch = None
+                    mem_diff = None
+
 
         self.current_diffs = (regs_diff, mem_diff, page_diff)
 
 
+        # Update Disassembly Viewer
         self.disassembly_viewer.ClearHighlightLines()
         self.disassembly_viewer.LoadState(state_id, target_full_state.instruction_address, target_full_state.memory_pages)
         self.disassembly_viewer.ApplyStatePatchesInViewer(mem_patch, page_diff)
 
+        if self.follow_current_instruction or self.current_state_id is None: # Only jump if it's the first load or follow is enabled
+            self.disassembly_viewer.JumpTo(target_full_state.instruction_address)
 
-        if self.follow_current_instruction or self.current_state_id is None:
-            self.disassembly_viewer.JumpTo(target_state.instruction_address)
-
+        # Update Registers Viewer
         self.registers_viewer.SetRegisters(target_full_state.state_id, target_full_state.registers_map)
         self.registers_viewer.SetRegsPatch(target_full_state.state_id, regs_patch)
         self.registers_viewer.DisplayRegisters()
 
+        # Update Memory Viewer (New)
+        self.mempages_viewer.LoadState(state_id, target_full_state.memory_pages)
+        # If no previous range, default to displaying around the instruction address.
+        if self.mempages_viewer.current_range_display_start == -1:
+            default_mem_start = (target_full_state.instruction_address // PAGE_SIZE) * PAGE_SIZE
+            self.mempages_viewer.DisplayMemoryRange(default_mem_start, default_mem_start + PAGE_SIZE)
+
+        self.mempages_viewer.ApplyStatePatchesInViewer(mem_patch, page_diff)
+
+
         self.current_full_state = target_full_state
         self.current_state_id = state_id
 
-        self.RefreshSubviewers()
-
-
-        return
-
-
-
-
+        self.RefreshSubviewers() # Refresh Choose dialogs if open
 
 
 
