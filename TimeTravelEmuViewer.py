@@ -180,11 +180,9 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
     def Create(self, title):
         return super().Create(title)
 
-
     def OnClose(self):
         for action_handler in self.menu_action_handlers:
             action_handler.unregister()
-
 
     def Show(self):
         self.CheckRebuild()
@@ -193,7 +191,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
     def Refresh(self):
         self.CheckRebuild()
         return super().Refresh()
-
 
     def ClearLines(self):
         self._lines_data.clear() # Use SortedList's clear method
@@ -249,7 +246,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             return super().AddLine(line, fgcolor, bgcolor) # Call base InsertLine
 
 
-
     def InsertLine(self, address, address_type, line, fgcolor=None, bgcolor=None):
         """
         Inserts a line at the position determined by the given address.
@@ -298,6 +294,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 return super().EditLine(lineno_to_edit, line, fgcolor, bgcolor) # Call base EditLine
             return False
         return False
+
 
     def EditLineColor(self, address, address_idx, fgcolor=None, bgcolor=None):
         """
@@ -376,6 +373,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             self.need_rebuild = True # If any lines were deleted, a rebuild is needed later
         return True
 
+
     def GetLine(self, address, address_idx):
         """
         Returns a line's content and colors identified by its binary address.
@@ -395,6 +393,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 return addr_info
         return None
 
+
     def Jump(self, address, x=0, y=0):
         """
         Jumps to the line associated with the given binary address.
@@ -411,7 +410,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             return super().Jump(lineno, x, y)
         return False
 
-    # --- Overridden methods that return line numbers (need conversion) ---
 
     def GetSelection(self):
         """
@@ -432,6 +430,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 return (x1, addr1, x2, addr2)
         return None
 
+
     def GetPos(self, mouse = 0):
         """
         Returns the current cursor or mouse position, with the line number
@@ -449,6 +448,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 return (info.address, x, y)
         return None
 
+
     def GetLineNo(self, mouse = 0):
         """
         Returns the binary address of the current line.
@@ -462,6 +462,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             return lineno
         return None
 
+
     def GetLineNoFromAddress(self, address):
         """
         Returns the line number associated with the given binary address.
@@ -474,6 +475,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             return lineno
         return -1
 
+
     def GetAddressFromLineNo(self, lineno):
         """
         Returns the binary address associated with the given line number.
@@ -485,7 +487,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         if info is not None:
             return info.address
         return None
-
 
 
     # def _JumpToWord(self, word):
@@ -598,7 +599,6 @@ class ColorfulLineGenerator():
         else:
             execution_counts_str = ida_lines.COLSTR(f"{execution_counts: 4}", ida_lines.SCOLOR_REGCMT)
 
-
         addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
         insn = ida_lines.generate_disasm_line(address)
         return f"{execution_counts_str} {addr_str}  {insn}"
@@ -692,7 +692,6 @@ class TTE_DisassemblyViewer():
         self.hightlighting_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, lineno, color),...]
 
 
-
     def InitViewer(self):
         self.viewer.Create(self.title)
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
@@ -743,8 +742,6 @@ class TTE_DisassemblyViewer():
         self.viewer.SetDblChickCallback(OnDblClickAction)
 
 
-
-
     def _SetMenuActions(self):
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:RefreshAction",
@@ -755,7 +752,6 @@ class TTE_DisassemblyViewer():
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:SetMemoryRangeAction",
                               self.SetDisplayMemoryRangeAction, "Set memory range", "R"))
-
 
 
     def AddMenuActions(self, action_handler: MenuActionHandler):
@@ -842,7 +838,6 @@ class TTE_DisassemblyViewer():
         form.Free()
 
 
-
     def _SetCustomViewerStatusBar(self):
         # Remove original status bar
         viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
@@ -853,7 +848,6 @@ class TTE_DisassemblyViewer():
         viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
         self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Memory Range: N\\A )")
         viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
-
 
 
     def LoadListFromESM(self, state_list: List[Tuple[str, EmuState]]):
@@ -928,6 +922,7 @@ class TTE_DisassemblyViewer():
         self.HighlightLines()
         self.viewer.Refresh()
 
+
     def DisplayMemoryRange(self, range_start, range_end):
         """
         Display memory range in the viewer. This function will clear the previous range and display the new range.
@@ -986,7 +981,10 @@ class TTE_DisassemblyViewer():
                 elif idc.is_data(current_addr_flag):
                     data_size = idc.get_item_size(current_addr)
                     offset = current_addr - start_addr
-                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[offset : offset + data_size], data_size)
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr,
+                                                                                  self.addr_len,
+                                                                                  data[offset : offset + data_size],
+                                                                                  data_size)
                     if data_size == 1:
                         self.viewer.AddLine(current_addr, SINGLE_DATA_LINE, line_text)
                     else:
@@ -995,7 +993,10 @@ class TTE_DisassemblyViewer():
                     current_addr += data_size
                     continue
                 else:
-                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr, self.addr_len, data[current_addr - start_addr : current_addr - start_addr + 1], 1)
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr,
+                                                                                  self.addr_len,
+                                                                                  data[current_addr - start_addr : current_addr - start_addr + 1],
+                                                                                  1)
                     self.viewer.AddLine(current_addr, SINGLE_DATA_LINE, line_text)
 
                     current_addr += 1
@@ -1016,10 +1017,6 @@ class TTE_DisassemblyViewer():
         self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
         self.HighlightLines()
         self.viewer.Refresh()
-
-
-
-
 
 
 
@@ -1120,7 +1117,6 @@ class TTE_RegistersViewer:
 
 
 
-
 class TTE_MemoryViewer:
     """
     A subviewer class of TimeTravelEmuViewer to display memory.
@@ -1191,13 +1187,13 @@ class TTE_MemoryViewer:
         self.current_range_display_end: int = -1
 
 
-
     def InitViewer(self):
         self.viewer.Create(self.title)
         self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self._SetCustomViewerStatusBar()
         self._SetDoubleClickCallback()
         self._SetMenuActions()
+
 
     def _SetDoubleClickCallback(self):
         def OnDblClickAction(custom_viewer: AddressAwareCustomViewer):
@@ -1211,6 +1207,7 @@ class TTE_MemoryViewer:
 
         self.viewer.SetDblChickCallback(OnDblClickAction)
 
+
     def _SetMenuActions(self):
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:RefreshAction",
@@ -1222,14 +1219,17 @@ class TTE_MemoryViewer:
                               f"{self.title}:SetMemoryRangeAction",
                               self.SetDisplayMemoryRangeAction, "Set memory range", "R"))
 
+
     def AddMenuActions(self, action_handler: MenuActionHandler):
         action_handler.parent_title = self.title
         self.viewer.AddAction(action_handler)
+
 
     def ClearLines(self):
         self.viewer.ClearLines()
         self.current_range_display_start = -1
         self.current_range_display_end = -1
+
 
     def JumpTo(self, address):
         """
@@ -1316,6 +1316,7 @@ class TTE_MemoryViewer:
             self.DisplayMemoryRange(range_start, range_end)
         form.Free()
 
+
     def _SetCustomViewerStatusBar(self):
         viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
         if not viewer_status_bar:
@@ -1331,6 +1332,7 @@ class TTE_MemoryViewer:
         viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
         self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Mem: N\\A )")
         viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
+
 
     def LoadState(self, state_id: str, memory_pages: Dict[int, Tuple[int, bytearray]]):
         """
@@ -1507,7 +1509,6 @@ class TTE_MemoryViewer:
 
 
 
-
 class TimeTravelEmuViewer(ida_kernwin.PluginForm):
     """
     The main TimeTravelEmuViewer class.
@@ -1543,7 +1544,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         # configs
         self.follow_current_instruction = False # True # Whether to follow the current instruction when switching states.
-
 
 
     def Init(self):
@@ -1588,7 +1588,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.mempages_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.mempages_viewer.title}:ShowDiffAction",
                               lambda : self.ShowDiffsAciton(self.mempages_viewer.title, self.mempages_viewer.JumpTo),   "Show diff", "D"))
-
 
 
     def SetDoubleClickCallback(self):
@@ -1652,7 +1651,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
         else:
             idaapi.warning("No states loaded from EmuStateManager.")
-
 
 
     def PopulateForm(self):
@@ -1953,6 +1951,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             idaapi.warning(f"Failed to generate full state for state {state_id}.")
             return
 
+        # Catch up all different information between current and target state
         regs_diff: Optional[Dict[str, Tuple[int, int]]] = None
         mem_diff: Optional[SortedDict] = None # SortedDict[address, (prev_value, new_value)] (single byte)
         page_diff: Optional[SortedDict] = None # SortedDict[page_start_addr, (change_mode, (perm, data))]
@@ -1995,7 +1994,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.registers_viewer.SetRegsPatch(target_full_state.state_id, regs_patch)
         self.registers_viewer.DisplayRegisters()
 
-        # Update Memory Viewer (New)
+        # Update Memory Viewer
         self.mempages_viewer.LoadState(state_id, target_full_state.memory_pages)
         # If no previous range, default to displaying around the instruction address.
         if self.mempages_viewer.current_range_display_start == -1:
@@ -2009,11 +2008,3 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.current_state_id = state_id
 
         self.RefreshSubviewers() # Refresh Choose dialogs if open
-
-
-
-
-
-
-
-
