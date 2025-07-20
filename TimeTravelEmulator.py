@@ -46,8 +46,6 @@ DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
 
 
 
-from os import getcwd
-LOG_FLIE_PATH = getcwd() + "/tte.log" #TODO: Remove it
 
 
 UNICORN_ARCH_MAP =      {
@@ -322,7 +320,7 @@ class TTE_Logger:
             cls._instance = super(TTE_Logger, cls).__new__(cls)
         return cls._instance
 
-    def start(self, log_file=None, log_level=logging.INFO):
+    def start(self, log_level, log_file=None):
         """
         Start the logger
         :param log_file: Log file path
@@ -402,16 +400,15 @@ def tte_log_err(message):
 
 @dataclass
 class EmuSettings():
-    start = 0x7FF73DCA1450#start#0x140001450#
-    end = -1#0x14000201C#end#
-    # emulate_step_limit = 10
-    is_load_registers = False
-    is_emulate_external_calls = False
-    is_log = True
-    is_map_mem_permissions = True
-    time_out = 0  #TODO: add it in emusetting form
-    count = 30  #TODO: add it in emusetting form
-    log_level = logging.WARNING #TODO: add it in emusetting form
+    start: int = -1
+    end: int = -1
+
+    is_load_registers: bool = False
+    is_jump_over_syscalls: bool = False
+    time_out: int = 0
+    count: int = 500
+    log_level: int = logging.WARNING
+    log_file_path: Optional[str] = None
 
 
 class EmuSettingsForm(idaapi.Form):
@@ -420,9 +417,15 @@ class EmuSettingsForm(idaapi.Form):
 
         self.i_start_address: Optional[ida_kernwin.Form.NumericInput] =  None
         self.i_end_address: Optional[ida_kernwin.Form.NumericInput] = None
-        self.c_configs_group: Optional[ida_kernwin.Form.ChkGroupControl] = None
+
         self.i_emulate_step_limit: Optional[ida_kernwin.Form.NumericInput] =  None
-        self.i_load_state_file_path: Optional[ida_kernwin.Form.FileInput] = None
+        self.i_time_out: Optional[ida_kernwin.Form.NumericInput] = None
+
+        self.c_configs_group: Optional[ida_kernwin.Form.ChkGroupControl] = None
+
+        self.i_log_level: Optional[ida_kernwin.Form.DropdownListControl] = None
+        self.i_log_file_path: Optional[ida_kernwin.Form.FileInput] = None
+
 
         super().__init__(
             r'''STARTITEM {id:i_start_address}
@@ -436,43 +439,62 @@ EmuTrace: Emulator Settings
             <Select Function range    :{b_select_function}>
 
             Configs:
-            <Emlate step limit: {i_emulate_step_limit}>
+            <Emlate step limit  :{i_emulate_step_limit}>
+            <Emlate time out    :{i_time_out}>
 
-            <load registers:{r_load_register}>
-            <emulate external calls:{r_emulate_external_calls}>
+            <load registers:{r_load_register}> | <Jump over syscalls:{r_jump_over_syscalls}>
             <log:{r_log}>{c_configs_group}>
 
-            State:
-            <Load state: {i_load_state_file_path}>
+            <Log Level:{i_log_level}>
+            <Log File Path:{i_log_file_path}>
+
 
             Advanced Configs:
+            <Open settings dialog:{b_open_settings_dialog}>
+
             ''',
             {
-                'FormChangeCb': self.FormChangeCb(self.__on_form_change),
+                'FormChangeCb': self.FormChangeCb(self._on_form_change),
                 'i_start_address': self.NumericInput(self.FT_ADDR, value=start_ea,  swidth = 30),
                 'i_end_address': self.NumericInput(self.FT_ADDR, value=end_ea, swidth = 30),
-                'b_select_function': self.ButtonInput(self.__open_select_function_dialog),
+                'b_select_function': self.ButtonInput(self._open_select_function_dialog),
 
-                'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=100, swidth = 30),
-                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_emulate_external_calls", "r_log")),
+                'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=500, swidth = 30),
+                "i_time_out": self.NumericInput(self.FT_DEC, value=0, swidth = 30),
+                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_jump_over_syscalls", "r_log")),
 
-                'i_load_state_file_path': self.FileInput(open = True,swidth = 30),
+
+                'i_log_level': self.DropdownListControl(
+                    items=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    readonly=True,
+                    selval=2
+                ),
+                'i_log_file_path': self.FileInput(save=True, swidth=30),
+
+                'b_open_settings_dialog': self.ButtonInput(self._open_settings_dialog)
             }
          )
         self.Compile()
-        self.r_log.checked=True # type: ignore #TODO: Remove it
 
-    def __on_form_change(self, fid: int):
+    def _on_form_change(self, fid: int):
         return 1
 
-    def __open_select_function_dialog(self, code = 0):
+    def _open_select_function_dialog(self, code = 0):
         target_func =  ida_kernwin.choose_func("Select target function range",1)
         if not target_func:
             return
 
-        self.__set_emu_range(target_func.start_ea, target_func.end_ea)
+        self._set_emu_range(target_func.start_ea, target_func.end_ea)
 
-    def __set_emu_range(self, start: int = -1, end: int = -1):
+    def _open_settings_dialog(self, code = 0):
+        pass
+        # TODO open settings dialog
+
+
+
+
+
+    def _set_emu_range(self, start: int = -1, end: int = -1):
         # set range by parameters
         if start != -1 and end != -1:
             start_t = start
@@ -506,19 +528,36 @@ EmuTrace: Emulator Settings
 
 
     def GetSetting(self):
-        self.__set_emu_range()
-        if self.i_emulate_step_limit is None or self.c_configs_group is None:
+        self._set_emu_range()
+        if self.i_emulate_step_limit is None or \
+           self.c_configs_group is None or \
+           self.i_time_out is None or \
+           self.i_log_level is None or \
+           self.i_log_file_path is None:
             ida_kernwin.warning("Form controls are not initialized.")
             return None
 
-        config_value = self.i_emulate_step_limit.value
-        is_load_registers = bool(config_value & 0b1)
-        is_emulate_external_calls = bool(config_value & 0b10)
-        is_log = bool(config_value & 0b100)
-        return EmuSettings()#self.sim_range_start,
-                        #    self.sim_range_end,
-                        #    self.i_emulate_step_limit.value,
-                        #    self.c_configs_group.value)
+        settings = EmuSettings()
+        settings.start = self.sim_range_start
+        settings.end = self.sim_range_end
+        settings.count = self.i_emulate_step_limit.value
+        settings.time_out = self.i_time_out.value
+
+        # Get values directly from individual ChkInput controls
+        settings.is_load_registers = self.r_load_register.checked # type: ignore
+        settings.is_jump_over_syscalls = self.r_jump_over_syscalls.checked # type: ignore
+        is_log_enabled = self.r_log.checked # type: ignore
+
+        log_level_map = {
+            0: logging.DEBUG,
+            1: logging.INFO,
+            2: logging.WARNING,
+            3: logging.ERROR,
+        }
+        settings.log_level = log_level_map.get(self.i_log_level.value, logging.WARNING)
+        settings.log_file_path = self.i_log_file_path.value
+
+        return settings
 
 
 
@@ -559,8 +598,6 @@ class EmuExecuter():
         if self._is_initialized:
             tte_log_info("EmuExecuter already initialized.")
             return
-        if(self.settings.is_log):
-            TTE_Logger().start(LOG_FLIE_PATH, self.settings.log_level) #TODO: allow user to select log file path and log level and remove it
 
 
         # Unicorn instance creation
@@ -730,7 +767,6 @@ class EmuExecuter():
         self.emu_map_mem_callback.clear()
         self.loaded_pages.clear()
 
-        TTE_Logger().stop()
         self._is_initialized = False
 
 
@@ -1332,10 +1368,8 @@ class EmuTracer():
 
         self.state_buffer = self.state_buffer_t(b"", [])
 
-        self._init_hook()
 
-
-    def _init_hook(self) -> None:
+    def init_hook(self) -> None:
         self._trace_code()
         self._trace_mem_write()
 
@@ -1480,18 +1514,6 @@ class InstrctionParser():
 
 
 
-class EmuViewer(ida_kernwin.simplecustviewer_t):
-    pass
-
-
-
-
-
-
-
-
-import cProfile
-import pstats
 
 
 
@@ -1502,31 +1524,84 @@ import pstats
 
 
 
+def StartTimeTravelEmulator(settings: EmuSettings) -> None:
+    """
+    Start the Time Travel Emulator with the given settings and display the Time Travel Emu Viewer.
+    :param setting: EmuSettings object containing the emulator settings.
+    """
+    TTE_Logger().start(settings.log_level, settings.log_file_path)
+
+    emu_executer = EmuExecuter(settings)
+    emu_executer.init()
+
+    emu_statesmanager = EmuStateManager()
+    emu_tracer = EmuTracer(emu_executer, emu_statesmanager)
+    emu_tracer.init_hook()
+
+    emu_executer.run()
+    emu_executer.destroy()
+
+    import sys
+    sys.path.append("F:/Projects/IDA-TimeTravelEmulator")
+    import TimeTravelEmuViewer
+    time_travel_emulator_viewer = TimeTravelEmuViewer.TimeTravelEmuViewer()
+    time_travel_emulator_viewer.Init()
+    time_travel_emulator_viewer.LoadESM(emu_statesmanager)
+    time_travel_emulator_viewer.Show(time_travel_emulator_viewer.title)
+
+    TTE_Logger().stop()
 
 
 
-
-# class EmuTrace(idaapi.plugin_t):
-#     flags = idaapi.PLUGIN_DRAW
-#     comment = "XXX"
-#     help = ""
-#     wanted_name = "EmuTrace"
-#     wanted_hotkey = "Ctrl+Alt+Shift+F12"
-#     wanted_hotkey = ""
+class TimeTravelEmulator(idaapi.plugin_t):
+    flags = idaapi.PLUGIN_DRAW
+    comment = "Time Travel Emulator"
+    wanted_name = "TimeTravelEmulator"
+    wanted_hotkey = PLUGIN_HOTKEY
 
 
-#     def __init__(self):
-#         super(EmuTrace, self).__init__()
-#         self._data = None
+    def __init__(self):
+        super().__init__()
+        self._data = None
 
-#     def term(self):
-#         pass
+    def term(self):
+        pass
 
-#     def init(self):
-#         return idaapi.PLUGIN_OK
+    def init(self):
+        idaapi.msg("[TimeTravelEmulator] Init\n")
+        arch = get_arch()
+        if arch is not None:
+            # Supported architecture found.
+            idaapi.msg(f"[TimeTravelEmulator] CPU architecture: {arch}\n")
+            idaapi.msg("[TimeTravelEmulator] Ready.\n")
+            return idaapi.PLUGIN_KEEP
+        else:
+            # No supported architecture found.
+            idaapi.msg("[TimeTravelEmulator] No supported architecture found.\n")
+            idaapi.msg("[TimeTravelEmulator] Disabled.\n")
+            return idaapi.PLUGIN_SKIP
 
-#     def run(self, arg):
-#         pass
+    def run(self, arg):
+        start, end = self.get_ea_range()
+        F = EmuSettingsForm(start, end)
+        IsEmulate = F.Execute()
+        if IsEmulate:
+            setting = F.GetSetting()
+            if setting is not None:
+                StartTimeTravelEmulator(setting)
+        F.Free()
 
-# def PLUGIN_ENTRY():
-#     return EmuTrace()
+    def get_ea_range(self):
+        selection, ea_addr, ea_addr_end = idaapi.read_range_selection(None)
+
+        if selection:
+            return ea_addr, ea_addr_end
+        else:
+            ea = idaapi.get_screen_ea()
+            start = idc.get_func_attr(ea,0)
+            end = idc.get_fchunk_attr(ea,8)
+            return start, end
+
+
+def PLUGIN_ENTRY():
+    return TimeTravelEmulator()
