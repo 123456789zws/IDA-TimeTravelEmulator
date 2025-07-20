@@ -23,11 +23,10 @@ from re import split
 
 import bsdiff4
 from sortedcontainers import SortedList
-from sympy import N, false
 from unicorn import *
 from unicorn.x86_const import *
 from capstone import *
-from PyQt5 import QtGui, QtCore, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 
 from TimeTravelEmulator import *
@@ -1126,13 +1125,12 @@ class TTE_MemoryViewer:
             ida_kernwin.UI_Hooks.__init__(self)
             self.viewer: AddressAwareCustomViewer = viewer
 
-            # 键: 行号 (int)
-            # 值: 列表，每个元素可以是 (颜色键) 或 (颜色键, 字符起始索引, 字符数量)
+            # Key: Line number Value: List, each element is (color key, character start index, number of characters)
             self.marked_bytes = {}
             self.hook()
 
         def get_lines_rendering_info(self, out, widget, rin):
-            # 只有当widget是我们的自定义视图时才应用着色
+            # Apply coloring only if widget is customview
             if widget == self.viewer.GetWidget():
                 for section_lines in rin.sections_lines:
                     for line_info in section_lines:
@@ -1184,6 +1182,23 @@ class TTE_MemoryViewer:
         self._SetMenuActions()
 
 
+    def _SetCustomViewerStatusBar(self):
+        viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
+        if not viewer_status_bar:
+            # Create a new status bar if it doesn't exist (e.g., if simplecustviewer_t doesn't create one by default)
+            viewer_status_bar = QtWidgets.QStatusBar()
+            self.viewer_widegt.layout().addWidget(viewer_status_bar) # Assuming a layout exists
+
+        # Clear existing widgets from status bar
+        for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
+            viewer_status_bar.removeWidget(widget)
+
+        self.statusbar_state_id_qlabel = QtWidgets.QLabel("[State: N\\A ]")
+        viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
+        self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Mem: N\\A )")
+        viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
+
+
     def _SetDoubleClickCallback(self):
         def OnDblClickAction(custom_viewer: AddressAwareCustomViewer):
             """
@@ -1207,7 +1222,9 @@ class TTE_MemoryViewer:
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:SetMemoryRangeAction",
                               self.SetDisplayMemoryRangeAction, "Set memory range", "R"))
-
+        self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
+                              f"{self.title}:ExportSelectedMemoryAction",
+                              self.ExportSelectedMemoryAction, "Export selected memory", "E"))
 
     def AddMenuActions(self, action_handler: MenuActionHandler):
         action_handler.parent_title = self.title
@@ -1306,22 +1323,61 @@ class TTE_MemoryViewer:
         form.Free()
 
 
-    def _SetCustomViewerStatusBar(self):
-        viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
-        if not viewer_status_bar:
-            # Create a new status bar if it doesn't exist (e.g., if simplecustviewer_t doesn't create one by default)
-            viewer_status_bar = QtWidgets.QStatusBar()
-            self.viewer_widegt.layout().addWidget(viewer_status_bar) # Assuming a layout exists
+    def ExportSelectedMemoryAction(self):
+        """
+        Exports the currently selected memory data as a byte array to idaapi.msg.
+        """
+        if not self.memory_pages_list:
+            idaapi.warning("No memory data loaded to export.")
+            return
 
-        # Clear existing widgets from status bar
-        for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
-            viewer_status_bar.removeWidget(widget)
+        selection = self.viewer.GetSelection()
+        if not selection:
+            return
 
-        self.statusbar_state_id_qlabel = QtWidgets.QLabel("[State: N\\A ]")
-        viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
-        self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Mem: N\\A )")
-        viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
+        # GetSelection returns (x1, address1, x2, address2)
+        x, start_addr, y, end_addr = selection
 
+        x_offset = (x - self.addr_len - 2 ) // 3
+        y_offset = (y - self.addr_len - 2 ) // 3
+
+        start_addr += x_offset
+        end_addr += y_offset
+
+        if start_addr > end_addr:
+            start_addr, end_addr = end_addr, start_addr # Swap if selected backwards
+
+        exported_bytes = bytearray()
+
+        # Iterate through the selected range
+        current_export_addr = start_addr
+        while current_export_addr < end_addr: # <= because end_addr is inclusive from GetSelection
+            found_byte = False
+            for page_start_addr, (perm, page_content) in self.memory_pages_list:
+                if page_start_addr <= current_export_addr < page_start_addr + PAGE_SIZE:
+                    offset_in_page = current_export_addr - page_start_addr
+                    exported_bytes.append(page_content[offset_in_page])
+                    found_byte = True
+                    break
+
+            if not found_byte:
+                exported_bytes.append(0x00) # Append a null byte for unmapped or unavailable memory
+
+            current_export_addr += 1
+
+        if not exported_bytes:
+            idaapi.msg("No data found in the selected range.\n")
+            return
+
+        # Format the bytearray for output via idaapi.msg
+        hex_dump = ', '.join(f"0x{byte:02x}" for byte in exported_bytes)
+
+        output_msg = f"--- Exported Memory Data (0x{start_addr:X} - 0x{end_addr:X}) ---\n"
+        output_msg += f"Hex: {hex_dump}\n"
+        output_msg += f"Length: {len(exported_bytes)} bytes\n"
+        output_msg += "----------------------------------------\n"
+
+        idaapi.msg(output_msg)
 
     def LoadState(self, state_id: str, memory_pages: Dict[int, Tuple[int, bytearray]]):
         """

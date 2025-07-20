@@ -1196,9 +1196,6 @@ class EmuStateManager():
         tte_log_dbg(f"State Manager: Create state at 0x{instruction_address:X}")
         new_state_id = self._generate_state_id(instruction_address)
 
-        #TODO testing: remove later
-        current_memory_pages = None #   type: ignore
-
         # Read the registers of unicorn instance
         current_registers_map = {
             reg_name: uc.reg_read(reg_const)
@@ -1233,39 +1230,6 @@ class EmuStateManager():
                                            instruction_address,
                                            current_registers_map,
                                            memory_patches)
-
-        # #TODO testing
-        # if current_memory_pages == None: #   type: ignore
-        #     current_memory_pages= self._read_memory_pages(uc, memory_regions)
-        # self.__test__(new_state_id,current_registers_map, current_memory_pages)
-
-
-    # #TODO testing func: remove later
-    # def __test__(self,new_state_id,current_registers_map ,current_memory_pages):
-    #     st1 = self.get_state(new_state_id)
-    #     assert st1 is not None, "State not found"
-    #     st2 = st1.generate_full_state(self.states_dict)
-    #     tte_log_dbg(f"State Manager: Test Pass: generate no error")
-
-    #     st3 = FullEmuState(new_state_id)
-    #     st3.set_data(current_registers_map, current_memory_pages) #   type: ignore
-    #     try:
-    #         assert(st2.registers_map == st3.registers_map) #   type: ignore
-    #     except:
-    #         tte_log_dbg("Cheack reg Fail")
-    #         print("st1 patch ",st1.reg_patches) #   type: ignore
-    #         print("st2  ",st2.registers_map) #   type: ignore
-    #         print("st1  ",st3.registers_map)
-
-    #     tte_log_dbg("Cheack regs Pass")
-    #     try:
-    #         assert(st2.memory_pages == st3.memory_pages) #   type: ignore
-    #         tte_log_dbg("Cheack mem Pass")
-    #     except:
-    #         tte_log_dbg("Cheack mem Fail")
-    #         print(st2.memory_pages) #   type: ignore
-    #         print(st3.memory_pages)
-    #         # print(self.get_state(st1.prev_state_id).generate_full_state(self.states_dict).__dict__)  #   type: ignore
 
 
     def _get_regs_map(self, state) -> Dict[str, int]:
