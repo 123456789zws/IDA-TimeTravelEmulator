@@ -181,8 +181,13 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         return super().Create(title)
 
     def OnClose(self):
+       self.UnregisterAction()
+
+    def UnregisterAction(self):
         for action_handler in self.menu_action_handlers:
             action_handler.unregister()
+        self.menu_action_handlers.clear()
+
 
     def Show(self):
         self.CheckRebuild()
@@ -531,7 +536,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
 
 
     def AddAction(self, action_handler: MenuActionHandler):
-        action_handler.register()
         actname = action_handler.get_action_name()
         ida_kernwin.attach_action_to_popup(self.GetWidget(), None, actname)
 
@@ -641,7 +645,7 @@ class TTE_DisassemblyViewer():
     To use it following the steps:
     1. Use self.InitViewer() to initializate the viewer.
     2. Set data: including self.memory_pages_list and self.execution_counts
-    3. Add self.viewer_widegt to TimeTravelEmuViewer's layout.
+    3. Add self.viewer_widget to TimeTravelEmuViewer's layout.
     4. Use self.DisplayMemoryRange to display memory pages in range.
     5. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
@@ -676,7 +680,7 @@ class TTE_DisassemblyViewer():
 
     def InitViewer(self):
         self.viewer.Create(self.title)
-        self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
+        self.viewer_widget  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self._SetCustomViewerStatusBar()
         self._SetDoubleClickCallback()
         self._SetMenuActions()
@@ -740,6 +744,10 @@ class TTE_DisassemblyViewer():
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:SetMemoryRangeAction",
                               self.SetDisplayMemoryRangeAction, "Set memory range", "R"))
+
+
+    def UnregisterAction(self):
+        self.viewer.UnregisterAction()
 
 
     def AddMenuActions(self, action_handler: MenuActionHandler):
@@ -828,7 +836,7 @@ class TTE_DisassemblyViewer():
 
     def _SetCustomViewerStatusBar(self):
         # Remove original status bar
-        viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
+        viewer_status_bar = self.viewer_widget.findChild(QtWidgets.QStatusBar)
         for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
             viewer_status_bar.removeWidget(widget)
 
@@ -1015,7 +1023,7 @@ class TTE_RegistersViewer:
     To use it following the steps:
     1. use self.InitViewer() to initializate the viewer.
     2. use self.LoadRegisters() to load registers lines
-    3. add self.viewer_widegt to TimeTravelEmuViewer's layout.
+    3. add self.viewer_widget to TimeTravelEmuViewer's layout.
     4. call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
@@ -1051,7 +1059,7 @@ class TTE_RegistersViewer:
 
     def InitViewer(self):
         self.viewer.Create(self.title)
-        self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
+        self.viewer_widget  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self.statusbar_label = QtWidgets.QLabel("State ID: N\\A")
 
         self._SetCustomViewerStatusBar()
@@ -1063,7 +1071,7 @@ class TTE_RegistersViewer:
 
     def _SetCustomViewerStatusBar(self):
         # Remove original status bar
-        viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
+        viewer_status_bar = self.viewer_widget.findChild(QtWidgets.QStatusBar)
         for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
             viewer_status_bar.removeWidget(widget)
 
@@ -1176,18 +1184,18 @@ class TTE_MemoryViewer:
 
     def InitViewer(self):
         self.viewer.Create(self.title)
-        self.viewer_widegt  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
+        self.viewer_widget  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
         self._SetCustomViewerStatusBar()
         self._SetDoubleClickCallback()
         self._SetMenuActions()
 
 
     def _SetCustomViewerStatusBar(self):
-        viewer_status_bar = self.viewer_widegt.findChild(QtWidgets.QStatusBar)
+        viewer_status_bar = self.viewer_widget.findChild(QtWidgets.QStatusBar)
         if not viewer_status_bar:
             # Create a new status bar if it doesn't exist (e.g., if simplecustviewer_t doesn't create one by default)
             viewer_status_bar = QtWidgets.QStatusBar()
-            self.viewer_widegt.layout().addWidget(viewer_status_bar) # Assuming a layout exists
+            self.viewer_widget.layout().addWidget(viewer_status_bar) # Assuming a layout exists
 
         # Clear existing widgets from status bar
         for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
@@ -1229,6 +1237,10 @@ class TTE_MemoryViewer:
     def AddMenuActions(self, action_handler: MenuActionHandler):
         action_handler.parent_title = self.title
         self.viewer.AddAction(action_handler)
+
+
+    def UnregisterAction(self):
+        self.viewer.UnregisterAction()
 
 
     def ClearLines(self):
@@ -1338,8 +1350,8 @@ class TTE_MemoryViewer:
         # GetSelection returns (x1, address1, x2, address2)
         x, start_addr, y, end_addr = selection
 
-        x_offset = (x - self.addr_len - 2 ) // 3
-        y_offset = (y - self.addr_len - 2 ) // 3
+        x_offset = max(min((x - self.addr_len - 3) // 3, self.BYTES_PER_LINE ), 0)
+        y_offset = max(min((y - self.addr_len - 2) // 3, self.BYTES_PER_LINE ), 0)
 
         start_addr += x_offset
         end_addr += y_offset
@@ -1679,6 +1691,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
     def OnClose(self, form):
+        self.disassembly_viewer.UnregisterAction()
+        self.mempages_viewer.UnregisterAction()
+
         for sub_chooser in self.subchooser_list:
             if sub_chooser:
                 sub_chooser.Close()
@@ -1707,14 +1722,14 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         main_splitter.setChildrenCollapsible(True)
 
 
-        main_splitter.addWidget(self.disassembly_viewer.viewer_widegt)
+        main_splitter.addWidget(self.disassembly_viewer.viewer_widget)
 
 
         right_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical) # type: ignore
         right_splitter.setChildrenCollapsible(True)
 
-        right_splitter.addWidget(self.registers_viewer.viewer_widegt)
-        right_splitter.addWidget(self.mempages_viewer.viewer_widegt)
+        right_splitter.addWidget(self.registers_viewer.viewer_widget)
+        right_splitter.addWidget(self.mempages_viewer.viewer_widget)
 
         main_splitter.addWidget(right_splitter)
 
@@ -1821,9 +1836,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             tte_log_dbg("No state_list loaded")
             return
 
-        self.states_chooser = StateChooser("State Chooser", self.state_list, self.SwitchState)
-        self.states_chooser.Show()
-        self.subchooser_list.append(self.states_chooser)
+        states_chooser = StateChooser("State Chooser", self.state_list, self.SwitchState)
+        states_chooser.Show()
+        self.subchooser_list.append(states_chooser)
 
 
     def ChooseMemoryPagesAction(self, parent_title: str,  display_memory_range_func):
@@ -1893,9 +1908,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             tte_log_dbg("No current full state")
             return
 
-        self.memory_pages_chooser = MemPageChooser(f"Memory Chooser for {parent_title}", lambda : self.current_full_state, display_memory_range_func)
-        self.memory_pages_chooser.Show()
-        self.subchooser_list.append(self.memory_pages_chooser)
+        memory_pages_chooser = MemPageChooser(f"Memory Chooser for {parent_title}", lambda : self.current_full_state, display_memory_range_func)
+        memory_pages_chooser.Show()
+        self.subchooser_list.append(memory_pages_chooser)
 
 
     def ShowDiffsAciton(self, parent_title: str, jumpto_address_func):
@@ -1976,11 +1991,11 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             tte_log_dbg("No state_list loaded")
             return
 
-        self.diff_chooser = DiffsChooser(
+        diff_chooser = DiffsChooser(
             f"Diffs Chooser for {parent_title}",
             lambda : self.current_diffs, jumpto_address_func)
-        self.diff_chooser.Show()
-        self.subchooser_list.append(self.diff_chooser)
+        diff_chooser.Show()
+        self.subchooser_list.append(diff_chooser)
 
 
     def ToggleFollowCurrentInstructionAction(self):
