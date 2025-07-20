@@ -664,7 +664,7 @@ class TTE_DisassemblyViewer():
         self.statusbar_memory_range_qlabel: Optional[QtWidgets.QLabel] = None
 
         self.execution_counts = None
-        self.codelines_list:Dict[int, int] = {}  # {address : address_idx)}
+        self.codelines_dict:Dict[int, int] = {}  # {address : address_idx)}
 
 
         self.current_state_id = None
@@ -676,6 +676,7 @@ class TTE_DisassemblyViewer():
 
 
         self.hightlighting_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, lineno, color),...]
+        self.code_lines_comments: List[Tuple[int, bool, str]] = [] # [(address, has_show, comment),...]
 
 
     def InitViewer(self):
@@ -852,6 +853,8 @@ class TTE_DisassemblyViewer():
 
     def LoadState(self, state_id: str, insn_address: int, memory_pages: Dict[int, Tuple[int, bytearray]]):
         assert self.statusbar_state_id_qlabel, "Status bar not initialized"
+        self.ClearHighlightLines()
+        self.ClearCodeLinesComments()
 
         self.current_insn_address = insn_address
         self.current_state_id = state_id
@@ -872,6 +875,43 @@ class TTE_DisassemblyViewer():
         while len(self.hightlighting_lines) > 0:
             address, lineno, color = self.hightlighting_lines.pop()
             self.viewer.EditLineColor(address, lineno, None)
+
+
+    def AddCodeLinesComments(self, address, comment):
+        self.code_lines_comments.append((address, False, comment))
+
+
+    def ShowCodeLinesComments(self):
+        for idx, (address, has_show, comment) in enumerate(self.code_lines_comments):
+            if not has_show:
+                address_idx = self.codelines_dict.get(address, 0)
+                line = self.viewer.GetLine(address, address_idx)
+                if line:
+                    line_with_comment = f"{line.value}  {comment}"
+                    self.viewer.EditLine(address,
+                                        address_idx,
+                                        CODE_LINE,
+                                        line_with_comment,
+                                        line.bgcolor,
+                                        line.bgcolor)
+                    # Replace the tuple with a new one with has_show set to True
+                    self.code_lines_comments[idx] = (address, True, comment)
+
+
+    def ClearCodeLinesComments(self):
+        while len(self.code_lines_comments) > 0:
+            address, has_show, comment = self.code_lines_comments.pop()
+            address_idx = self.codelines_dict.get(address, 0)
+            if has_show:
+                line = self.viewer.GetLine(address, address_idx)
+                if line:
+                    line_without_comment = line.value[:-(len(comment)+2)]
+                    self.viewer.EditLine(address,
+                                        address_idx,
+                                        CODE_LINE,
+                                        line_without_comment,
+                                        line.fgcolor,
+                                        line.bgcolor)
 
 
     def ApplyStatePatchesInViewer(self, mem_patch: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
@@ -914,8 +954,9 @@ class TTE_DisassemblyViewer():
                 self.hightlighting_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
 
         if self.current_insn_address > 0 and self.current_insn_address > self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
-            self.AddHightlightLine(self.current_insn_address, self.codelines_list.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
+            self.AddHightlightLine(self.current_insn_address, self.codelines_dict.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
         self.HighlightLines()
+        self.ShowCodeLinesComments()
         self.viewer.Refresh()
 
 
@@ -970,7 +1011,7 @@ class TTE_DisassemblyViewer():
                                                                                        code_size,
                                                                                        count)
                     self.viewer.AddLine(current_addr, CODE_LINE, line_text)
-                    self.codelines_list[current_addr] = address_idx
+                    self.codelines_dict[current_addr] = address_idx
                     current_addr += code_size
                     continue
 
@@ -1008,10 +1049,12 @@ class TTE_DisassemblyViewer():
         self.current_range_display_end = range_end
 
         # Highlight current instruction in memory range.
-        self.AddHightlightLine(self.current_insn_address, self.codelines_list.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
+        if self.current_insn_address > 0 and self.current_insn_address > self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
+            self.AddHightlightLine(self.current_insn_address, self.codelines_dict.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
         # Set status bar memory range label.
         self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
         self.HighlightLines()
+        self.ShowCodeLinesComments()
         self.viewer.Refresh()
 
 
@@ -2068,10 +2111,9 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
         # Update Disassembly Viewer
-        self.disassembly_viewer.ClearHighlightLines()
+
         self.disassembly_viewer.LoadState(target_state_id, target_full_state.instruction_address, target_full_state.memory_pages)
         self.disassembly_viewer.ApplyStatePatchesInViewer(mem_patch, page_diff)
-
         if self.follow_current_instruction or self.current_state_id is None: # Only jump if it's the first load or follow is enabled
             self.disassembly_viewer.JumpTo(target_full_state.instruction_address)
 

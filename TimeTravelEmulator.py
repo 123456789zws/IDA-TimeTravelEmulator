@@ -1520,7 +1520,7 @@ def StartTimeTravelEmulator(settings: EmuSettings) -> None:
 class TimeTravelEmulator(idaapi.plugin_t):
     flags = idaapi.PLUGIN_DRAW
     comment = "Time Travel Emulator"
-    wanted_name = "TimeTravelEmulator"
+    wanted_name = "Time Travel Emulator"
     wanted_hotkey = PLUGIN_HOTKEY
 
 
