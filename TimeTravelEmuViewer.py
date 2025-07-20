@@ -1529,7 +1529,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.current_state_id: Optional[str] = None # Only SwitchStateDisplay() can change this value.
         self.current_full_state: Optional[FullEmuState] = None # Only SwitchStateDisplay() can change this value.
 
-        self.current_diffs: Optional[Tuple[Optional[Dict[str, Tuple[int, int]]], Optional[SortedDict], Optional[SortedDict]]] = None
+        self.current_diffs: Optional[Tuple[Tuple[Optional[str], str],  Optional[Dict[str, Tuple[int, int]]], Optional[SortedDict], Optional[SortedDict]]] = None
 
         # configs
         self.follow_current_instruction = False # True # Whether to follow the current instruction when switching states.
@@ -1868,7 +1868,8 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                 self.items = [] # Initialize items list
 
             def OnInit(self):
-                regs_diff, mem_diff, page_diff = self.get_current_diff_func() # Optional[Tuple[Optional[Dict[str, int]], Optional[SortedDict], Optional[SortedDict]]]
+                (prev_state_id, curr_state_id), regs_diff, mem_diff, page_diff = self.get_current_diff_func() # Optional[Tuple[Optional[Dict[str, int]], Optional[SortedDict], Optional[SortedDict]]]
+                tte_log_info(f"Showing differents from {prev_state_id} to {curr_state_id}")
                 self.items = []
                 if regs_diff:
                     for reg_name, (prev_reg_val, reg_val) in regs_diff.items():
@@ -1939,30 +1940,30 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         for chooser in self.subchooser_list:
             chooser.Refresh()
 
-    def SwitchState(self, state_id: str):
+    def SwitchState(self, target_state_id: str):
         assert self.state_list is not None, "No state_list loaded"
-        target_state_idx = next((i for i, (x, y) in enumerate(self.state_list) if x == state_id), -1)
+        target_state_idx = next((i for i, (x, y) in enumerate(self.state_list) if x == target_state_id), -1)
         if target_state_idx >= 0:
             self.current_state_idx = target_state_idx
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
-        self.SwitchStateDisplay(state_id)
+        self.SwitchStateDisplay(target_state_id)
 
 
-    def SwitchStateDisplay(self, state_id: str):
+    def SwitchStateDisplay(self, target_state_id: str):
         assert self.state_manager is not None, "No state_manager loaded"
 
         # Avoid unnecessary re-rendering if already on this state
-        if state_id == self.current_state_id and self.current_full_state is not None:
+        if target_state_id == self.current_state_id and self.current_full_state is not None:
             return
 
-        target_state = self.state_manager.get_state(state_id)
+        target_state = self.state_manager.get_state(target_state_id)
         if target_state is None:
-            idaapi.warning(f"State {state_id} not found in state_manager.")
+            idaapi.warning(f"State {target_state_id} not found in state_manager.")
             return
 
         target_full_state = target_state.generate_full_state(self.state_manager.states_dict)
         if target_full_state is None:
-            idaapi.warning(f"Failed to generate full state for state {state_id}.")
+            idaapi.warning(f"Failed to generate full state for state {target_state_id}.")
             return
 
         # Catch up all different information between current and target state
@@ -1992,12 +1993,12 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                     mem_diff = None
 
 
-        self.current_diffs = (regs_diff, mem_diff, page_diff)
+        self.current_diffs = ((self.current_state_id, target_state_id), regs_diff, mem_diff, page_diff)
 
 
         # Update Disassembly Viewer
         self.disassembly_viewer.ClearHighlightLines()
-        self.disassembly_viewer.LoadState(state_id, target_full_state.instruction_address, target_full_state.memory_pages)
+        self.disassembly_viewer.LoadState(target_state_id, target_full_state.instruction_address, target_full_state.memory_pages)
         self.disassembly_viewer.ApplyStatePatchesInViewer(mem_patch, page_diff)
 
         if self.follow_current_instruction or self.current_state_id is None: # Only jump if it's the first load or follow is enabled
@@ -2009,7 +2010,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.registers_viewer.DisplayRegisters()
 
         # Update Memory Viewer
-        self.mempages_viewer.LoadState(state_id, target_full_state.memory_pages)
+        self.mempages_viewer.LoadState(target_state_id, target_full_state.memory_pages)
         # If no previous range, default to displaying around the instruction address.
         if self.mempages_viewer.current_range_display_start == -1:
             default_mem_start = (target_full_state.instruction_address // PAGE_SIZE) * PAGE_SIZE
@@ -2019,6 +2020,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
         self.current_full_state = target_full_state
-        self.current_state_id = state_id
+        self.current_state_id = target_state_id
 
         self.RefreshSubviewers() # Refresh Choose dialogs if open
