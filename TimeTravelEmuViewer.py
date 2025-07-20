@@ -38,6 +38,7 @@ PAGE_SIZE = 0x1000
 
 NEXT_STATE_ACTION_SHORTCUT = "F3"
 PREV_STATE_ACTION_SHORTCUT = "F2"
+CURSOR_STATE_ACTION_SHORTCUT = "Q"
 
 EXECUTE_INSN_HILIGHT_COLOR = 0xFFD073
 CHANGE_HIGHLIGHT_COLOR   = 0xFFD073
@@ -431,24 +432,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         return None
 
 
-    def GetPos(self, mouse = 0):
-        """
-        Returns the current cursor or mouse position, with the line number
-        converted to a binary address.
-
-        :param mouse: return mouse position.
-        :return: Returns a tuple (address, x, y) or None if position cannot be determined.
-        """
-        self.CheckRebuild()
-        pos = super().GetPos(mouse)
-        if pos:
-            lineno, x, y = pos
-            info = self._get_address_info_from_lineno(lineno)
-            if info is not None:
-                return (info.address, x, y)
-        return None
-
-
     def GetLineNo(self, mouse = 0):
         """
         Returns the binary address of the current line.
@@ -699,6 +682,12 @@ class TTE_DisassemblyViewer():
         self._SetDoubleClickCallback()
         self._SetMenuActions()
 
+
+    def GetCursorAddress(self):
+        lineno =  self.viewer.GetLineNo()
+        if lineno is not None:
+            return self.viewer.GetAddressFromLineNo(lineno)
+        return None
 
 
     def _SetDoubleClickCallback(self):
@@ -1555,15 +1544,19 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:NextStateAction",
-                              self.DisplayNextStateAction, "Next state", NEXT_STATE_ACTION_SHORTCUT))
+                              self.SwitchNextStateAction, "Next state", NEXT_STATE_ACTION_SHORTCUT))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:PrevStateAction",
-                              self.DisplayPrevStateAction, "Previous state", PREV_STATE_ACTION_SHORTCUT))
+                              self.SwitchPrevStateAction, "Previous state", PREV_STATE_ACTION_SHORTCUT))
+
+        self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
+                              f"{self.disassembly_viewer.title}:CursorStateAction",
+                              self.SwitchCursorStateAction, "Switch to state at cursor address", CURSOR_STATE_ACTION_SHORTCUT))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:StageInputAction",
-                              self.DisplayInputStateAction, "Switch to input state", "S"))
+                              self.SwitchInputStateAction, "Switch to input state", "I"))
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:ChooseStatesAction",
@@ -1674,7 +1667,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         main_layout.setContentsMargins(0, 0, 0, 0)
 
 
-    def DisplayNextStateAction(self):
+    def SwitchNextStateAction(self):
         assert self.state_list is not None, "No state_list loaded"
         if self.current_state_idx < len(self.state_list) - 1:
             self.current_state_idx += 1
@@ -1683,7 +1676,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         #     idaapi.msg("Already at the last state.\n")
 
 
-    def DisplayPrevStateAction(self):
+    def SwitchPrevStateAction(self):
         assert self.state_list is not None, "No state_list loaded"
         if self.current_state_idx > 0:
             self.current_state_idx -= 1
@@ -1692,7 +1685,25 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         #     idaapi.msg("Already at the first state.\n")
 
 
-    def DisplayInputStateAction(self):
+    def SwitchCursorStateAction(self):
+        assert self.state_manager is not None, "No state_manager loaded"
+        assert self.state_list is not None, "No state_list loaded"
+
+        address = self.disassembly_viewer.GetCursorAddress()
+        if address:
+            address_str = f"0x{address:X}"
+            target_state_id = next((state_id for state_id, state in self.state_list if address_str in state_id), None)
+            if target_state_id:
+                self.SwitchState(target_state_id)
+        #     else:
+        #         idaapi.msg(f"No state found for address {address_str}\n")
+        # else:
+        #     idaapi.msg("No cursor address.\n")
+
+
+
+
+    def SwitchInputStateAction(self):
         assert self.state_manager is not None, "No state_manager loaded"
         assert self.state_list is not None, "No state_list loaded"
 
