@@ -1,0 +1,5 @@
+PyQt5
+bsdiff4==1.2.6
+capstone==5.0.2
+sortedcontainers==2.4.0
+unicorn==2.1.3

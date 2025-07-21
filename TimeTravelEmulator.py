@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
 from copy import deepcopy
-from attr import dataclass
+from dataclasses import dataclass
 
 
 
