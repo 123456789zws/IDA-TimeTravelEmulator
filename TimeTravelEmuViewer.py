@@ -17,7 +17,7 @@ from abc import ABC
 from collections import defaultdict
 from typing import Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 from copy import deepcopy
-from attr import dataclass
+from dataclasses import dataclass
 from re import split
 
 

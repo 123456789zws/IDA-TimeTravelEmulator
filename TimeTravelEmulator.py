@@ -137,26 +137,16 @@ IDA_PERM_TO_UC_PERM_MAP = {
 
 
 def get_bitness() -> Union[None, Literal[64], Literal[32]]:
-    # compatibility IDA 9.0 and above
-    if idaapi.IDA_SDK_VERSION >= 900:
-        if ida_ida.inf_is_64bit():
-            return 64
-        elif ida_ida.inf_is_32bit_exactly():
-            return 32
-    else:
-        info = idaapi.get_inf_structure() # TODO: Adapt IDA9: ida_ida.inf_is_64bit():
-        if info.is_64bit():
-            return 64
-        elif info.is_32bit():
-            return 32
+    if ida_ida.inf_is_64bit():
+        return 64
+    elif ida_ida.inf_is_32bit_exactly():
+        return 32
 
 def get_is_be() -> bool:
-        info = idaapi.get_inf_structure()
         return ida_ida.inf_is_be()
 
 def get_arch() -> str:
-    structure_info = idaapi.get_inf_structure()
-    proc_name = structure_info.procname
+    proc_name = idaapi.inf_get_procname()
     proc_bitness = get_bitness()
 
     if proc_bitness == None:
