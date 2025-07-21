@@ -1,11 +1,8 @@
-from unittest import result
-from traitlets import Instance
 import idaapi
-import ida_lines
 import ida_ida
 import ida_kernwin
 import logging
-import ida_nalt
+import ida_dbg
 import idc
 import ida_bytes
 import ida_segment
@@ -161,6 +158,69 @@ def get_arch() -> str:
         return ""
     return IDA_PROC_TO_ARCH_MAP[(proc_name, proc_bitness)]
 
+def get_arch_x64_reg_value() -> Dict[int, int]:
+    if not idaapi.is_debugger_on():
+        return {}
+    arch = get_arch()
+    if arch not in UNICORN_REGISTERS_MAP:
+        return {}
+
+    result: Dict[int, int] = {}
+    regs_map =  UNICORN_REGISTERS_MAP[arch]
+    for reg_name, uc_reg_const in regs_map.items():
+        if reg_name == "Rflags":
+            print(f"rflag")
+            flag_positions = {
+                "CF": 0,    # Carry Flag
+                "PF": 2,    # Parity Flag
+                "AF": 4,    # Auxiliary Carry Flag
+                "ZF": 6,    # Zero Flag
+                "SF": 7,    # Sign Flag
+                "TF": 8,    # Trap Flag
+                "IF": 9,    # Interrupt Enable Flag
+                "DF": 10,   # Direction Flag
+                "OF": 11,   # Overflow Flag
+                "IOPL": 12, # I/O Privilege Level (Usually two bit)
+                "NT": 14,   # Nested Task Flag
+                "RF": 16,   # Resume Flag
+                "VM": 17,   # Virtual-8086 Mode Flag
+                "AC": 18,   # Alignment Check / Access Control Flag
+                "VIF": 19,  # Virtual Interrupt Flag
+                "VIP": 20,  # Virtual Interrupt Pending
+                "ID": 21    # ID Flag
+            }
+            rflags_value = 0
+            for flag_name, bit_pos in flag_positions.items():
+                try:
+                    flag_val = ida_dbg.get_reg_val(flag_name)
+
+                    if flag_val is not None:
+                        if flag_name == "IOPL":
+                            rflags_value |= ((flag_val & 0x3) << bit_pos)
+                        else:
+                            if flag_val == 1:
+                                rflags_value |= (1 << bit_pos)
+                except Exception as e:
+                    continue
+            print(f"RFLAGS: 0x{rflags_value:016X}")
+            result[uc_reg_const] = rflags_value
+        elif reg_name in ["FS", "GS"]:
+            continue
+        else:
+            try:
+                reg_value = ida_dbg.get_reg_val(reg_name)
+                result[uc_reg_const] = reg_value
+            except Exception as e:
+                tte_log_err(f"Error getting register value for {reg_name}: {e}")
+                pass
+    return result
+
+
+
+
+
+
+
 
 def get_page_slice(page_start: int, page_size: int) -> List[Tuple[int, int]]:
     """
@@ -194,17 +254,6 @@ def get_segment_prem(addr: int) -> int:
                 uc_perm |= uc_bit
         return uc_perm
     return DEFAULT_PAGE_PERMISSION
-
-
-def is_address_range_loaded(start_ea, end_ea) -> bool:
-    """
-    Check if the given address range is loaded into the database.
-    """
-    tte_log_dbg(f"Checking if address range {hex(start_ea)} - {hex(end_ea)} is loaded...")
-    if start_ea < ida_ida.inf_get_min_ea() or end_ea > ida_ida.inf_get_max_ea():
-        return False
-    return ida_bytes.next_that(start_ea - 1, end_ea + 1, lambda flags: ida_bytes.has_value(flags)) != idaapi.BADADDR
-
 
 
 def catch_dict_patch(
@@ -424,6 +473,8 @@ class EmuSettingsForm(idaapi.Form):
         self.i_time_out: Optional[ida_kernwin.Form.NumericInput] = None
 
         self.c_configs_group: Optional[ida_kernwin.Form.ChkGroupControl] = None
+        self.r_load_register: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+        self.r_jump_over_syscalls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
 
         self.i_log_level: Optional[ida_kernwin.Form.DropdownListControl] = None
         self.i_log_file_path: Optional[ida_kernwin.Form.FileInput] = None
@@ -444,7 +495,8 @@ EmuTrace: Emulator Settings
             <Emlate step limit  :{i_emulate_step_limit}>
             <Emlate time out    :{i_time_out}>
 
-            <load registers:{r_load_register}> | <Jump over syscalls:{r_jump_over_syscalls}>
+            <load registers:{r_load_register}>
+            <Jump over syscalls:{r_jump_over_syscalls}>
             <log:{r_log}>{c_configs_group}>
 
             <Log Level:{i_log_level}>
@@ -477,9 +529,17 @@ EmuTrace: Emulator Settings
             }
          )
         self.Compile()
-        self.preprocessing_code: str = "mu = emu_executor.get_mu()"
+        self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
 
     def _on_form_change(self, fid: int):
+        assert self.r_load_register is not None, "r_load_register is not initialized"
+
+        if fid == -1:
+            if not idaapi.is_debugger_on():
+                self.EnableField(self.r_load_register, False)
+            else:
+                self.EnableField(self.r_load_register, True)
+
         return 1
 
     def _open_select_function_dialog(self, code = 0):
@@ -694,7 +754,7 @@ class EmuExecutor():
         try:
             exec(preprocessing_code)
         except Exception as e:
-            print(f"Error executing preprocessing code: {e}")
+            idaapi.msg(f"Error executing preprocessing code: {e}")
             return idaapi.ask_yn(0, f"Error executing preprocessing code: {e}\nDo you want to continue?")
         return 1
 
@@ -753,8 +813,8 @@ class EmuExecutor():
         map_size = (end_ea - map_start + PAGE_SIZE - 1) & PAGE_MASK
 
         self._map_memory(map_start, map_size)
-        if not is_address_range_loaded(start_ea, end_ea):
-            return
+        # if not is_address_range_loaded(start_ea, end_ea):
+        #     return
 
         for page_start in range(map_start, map_start + map_size, PAGE_SIZE):
             if page_start not in self.loaded_pages:
@@ -803,6 +863,29 @@ class EmuExecutor():
             self.mu.reg_write(stack_point, DEFAULT_STACK_POINT_VALUE + offset)
             self.mu.reg_write(frame_point, DEFAULT_BASE_POINT_VALUE + offset)
             tte_log_info(f"Init regs: Sets registers default stack regs value: sp = {DEFAULT_STACK_POINT_VALUE + offset:X}, bp = {DEFAULT_BASE_POINT_VALUE + offset:X}")
+
+        elif self.settings.is_load_registers and self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_64:
+            for reg_id, reg_value in get_arch_x64_reg_value().items():
+                if reg_value is not None:
+                    self.mu.reg_write(reg_id, reg_value)
+                    tte_log_info(f"Init regs: Sets register ID {reg_id} value: 0x{reg_value:X}")
+                else:
+                    tte_log_info(f"Init regs: Skip register ID {reg_id} value: None")
+
+        # TODO support x86_32
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
     def add_mu_hook(self, htype: int, callback, user_data = None, begin: int = 1, end: int = 0) -> int:
@@ -1086,8 +1169,8 @@ class EmuStateManager():
     """
 
     MAX_PATCH_CHAIN_LENGTH = 100 # The longest patch chain, if it exceeds the full snapshot
-    MAX_HEAVY_PATCH_COUNT = 5
-    MAX_CUMULATIVE_DIFF_THRESHOLD = 0x100 # Accumulated difference threshold, if it exceeds it, create a full snapshot
+    MAX_HEAVY_PATCH_COUNT = 10
+    MAX_CUMULATIVE_DIFF_THRESHOLD = 0x1000 # Accumulated difference threshold, if it exceeds it, create a full snapshot
     STATE_ID_FORMAT = "$0x{address:X}#{count}"
 
     def __init__(self) -> None:
@@ -1158,8 +1241,6 @@ class EmuStateManager():
 
         self.states_dict[new_state_id] = new_state
 
-        self.patch_chain_count = 0
-        self.cumulative_diff_size = 0
         self.last_full_state_id = new_state_id
         self.last_state_id = new_state_id # Update the last status id
         tte_log_dbg(f"State Manager: Created FULL state: {new_state_id}")
@@ -1252,17 +1333,24 @@ class EmuStateManager():
         return result
 
     def _determine_next_state_type(self):
-        if self.last_full_state_id is None or self.heavy_patch_count > self.MAX_HEAVY_PATCH_COUNT:
-            # If this is the first full state, always create a full state
-            return EmuState.STATE_TYPE_FULL
+        tte_log_dbg(f"Determine next state type: heavy patch count: {self.heavy_patch_count}, cumulative diff size: {self.cumulative_diff_size}, has_map_memory: {self.has_map_memory}")
 
-        elif self.patch_chain_count >= self.MAX_PATCH_CHAIN_LENGTH or self.cumulative_diff_size >= self.MAX_CUMULATIVE_DIFF_THRESHOLD:
+        if self.last_full_state_id is None or self.heavy_patch_count > self.MAX_HEAVY_PATCH_COUNT or \
+            self.patch_chain_count >= self.MAX_PATCH_CHAIN_LENGTH or self.cumulative_diff_size >= self.MAX_CUMULATIVE_DIFF_THRESHOLD :
+            self.has_map_memory = False
+            self.heavy_patch_count = 0
+            self.patch_chain_count = 0
+            self.cumulative_diff_size = 0
+
+            tte_log_dbg("Create full state")
             return EmuState.STATE_TYPE_FULL
 
         elif self.has_map_memory == True:
             self.has_map_memory = False
+            tte_log_dbg("Create heavy patch state")
             return EmuState.STATE_TYPE_HEAVY_PATCH
 
+        tte_log_dbg("Create light state")
         return EmuState.STATE_TYPE_LIGHT_PATCH
 
 
@@ -1486,7 +1574,11 @@ class EmuTracer():
         @Callback function for hook "UC_HOOK_MEM_WRITE"
 
         """
-        value_bytes = value.to_bytes(size, byteorder='big' if get_is_be() else 'little')
+        tte_log_dbg(f"Catch memory write: address={hex(address)}, size={size}, value= {hex(value)}")
+        if value >= 0:
+            value_bytes = value.to_bytes(size, byteorder='big' if get_is_be() else 'little', signed=False)
+        else:
+            value_bytes = value.to_bytes(size, byteorder='big' if get_is_be() else 'little', signed=True)
         # Save the memory patch to the state buffer
         self.state_buffer.memory_patches.append((address, size, value_bytes))
         return True

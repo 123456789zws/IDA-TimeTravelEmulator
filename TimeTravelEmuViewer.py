@@ -343,6 +343,27 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         return False
 
 
+    def UpdateLineRange(self, address, length, address_type, line, fgcolor=None, bgcolor=None):
+        """
+        Updates an existing line identified by its binary address.
+        or inserts a new line if it does not exist.
+
+        :return: Boolean indicating success.
+        """
+        self.CheckRebuild()
+        target_line_info = address_line_info(address=address, address_idx=0)
+        lineno_to_edit = self._lines_data.bisect_left(target_line_info)
+        if lineno_to_edit < len(self._lines_data):
+            line_info: address_line_info = self._lines_data[lineno_to_edit] # type: ignore
+            if line_info.address == address and \
+                line_info.address_idx == 0:
+                # Del the entire range
+                for offset in range(length):
+                    self.DelLine(address + offset, lazy=False)
+                return self.InsertLine(address, address_type, line, fgcolor, bgcolor)
+        return False
+
+
     def PatchLine(self, address, address_idx, offs, value):
         raise AssertionError("PatchLine is Forbidden")
 
@@ -577,8 +598,8 @@ class ColorfulLineGenerator():
         return f"     {addr_str}  {name_str}"
 
     @staticmethod
-    def GenerateDisassemblyCodeLine(address, address_len, value, value_len, execution_counts) -> str:
-        # TODO: Improve the instruction display support for SMC(Self Modifying Code) technology
+    def GenerateDisassemblyCodeLine(address, address_len, value, value_len, execution_counts, generate_by_capstone=False) -> str:
+
         if execution_counts == 0:
             execution_counts_str = "    "
         elif execution_counts == 1:
@@ -587,7 +608,10 @@ class ColorfulLineGenerator():
             execution_counts_str = ida_lines.COLSTR(f"{execution_counts: 4}", ida_lines.SCOLOR_REGCMT)
 
         addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
-        insn = ida_lines.generate_disasm_line(address)
+        if not generate_by_capstone:
+            insn = ida_lines.generate_disasm_line(address)
+        else:
+            insn = InstrctionParser().parse_instruction(value)
         return f"{execution_counts_str} {addr_str}  {insn}"
 
     @staticmethod
@@ -668,7 +692,7 @@ class TTE_DisassemblyViewer():
         self.codelines_dict:Dict[int, int] = {}  # {address : address_idx)}
 
 
-        self.current_state_id = None
+        self.current_state = None
         self.memory_pages_list = None
 
         self.current_insn_address: int = -1
@@ -852,15 +876,15 @@ class TTE_DisassemblyViewer():
         self.execution_counts= {state.instruction_address: state.execution_count for _, state in state_list}
 
 
-    def LoadState(self, state_id: str, insn_address: int, memory_pages: Dict[int, Tuple[int, bytearray]]):
+    def LoadState(self, state: EmuState, insn_address: int, memory_pages: Dict[int, Tuple[int, bytearray]]):
         assert self.statusbar_state_id_qlabel, "Status bar not initialized"
         self.ClearHighlightLines()
         self.ClearCodeLinesComments()
 
+        self.current_state = state
         self.current_insn_address = insn_address
-        self.current_state_id = state_id
         self.memory_pages_list = sorted(memory_pages.items())
-        self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state_id} ]")
+        self.statusbar_state_id_qlabel.setText(f"[State: {self.current_state.state_id} ]")
 
 
     def AddHightlightLine(self, address, address_idx, color):
@@ -924,7 +948,9 @@ class TTE_DisassemblyViewer():
                             change_mode: 1 - removed, 2 - added
         :return: None
         """
+        assert self.current_state is not None, "State not loaded"
         assert self.memory_pages_list, "State data not loaded"
+
         if page_diff:
             need_rebuild = False
             for start_addr, (change_mode, data) in page_diff.items():
@@ -955,7 +981,23 @@ class TTE_DisassemblyViewer():
                 self.hightlighting_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
 
         if self.current_insn_address > 0 and self.current_insn_address > self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
+            # Highlight current instruction in memory range.
             self.AddHightlightLine(self.current_insn_address, self.codelines_dict.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
+
+            # If the current instruction is not recognized as a code by IDA, disassemlby it use capstone.
+            if not idc.is_code(ida_bytes.get_flags(self.current_insn_address)):
+                count = 0
+                if self.execution_counts and self.current_insn_address in self.execution_counts:
+                    count = self.execution_counts[self.current_insn_address]
+                if len(self.current_state.instruction) != 0:
+                    self.viewer.UpdateLineRange(self.current_insn_address, len(self.current_state.instruction), SINGLE_DATA_LINE,
+                                        ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
+                                                                                            self.addr_len,
+                                                                                            self.current_state.instruction,
+                                                                                            len(self.current_state.instruction),
+                                                                                            count,
+                                                                                            True),
+                                                                                            None, None)
         self.HighlightLines()
         self.ShowCodeLinesComments()
         self.viewer.Refresh()
@@ -970,8 +1012,9 @@ class TTE_DisassemblyViewer():
         :param range_end: end address of the range.
         :return: None
         """
-        assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
+        assert self.current_state is not None, "State not loaded"
         assert self.memory_pages_list and self.execution_counts, "State data not loaded"
+        assert self.statusbar_memory_range_qlabel, "Status bar not initialized"
 
         self.viewer.ClearLines()
         self.codelines_dict.clear()
@@ -1050,9 +1093,27 @@ class TTE_DisassemblyViewer():
         self.current_range_display_start = range_start
         self.current_range_display_end = range_end
 
-        # Highlight current instruction in memory range.
         if self.current_insn_address > 0 and self.current_insn_address > self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
+            # Highlight current instruction in memory range.
             self.AddHightlightLine(self.current_insn_address, self.codelines_dict.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
+
+            # If the current instruction is not recognized as a code by IDA, disassemlby it use capstone.
+            if not idc.is_code(ida_bytes.get_flags(self.current_insn_address)):
+                count = 0
+                if self.execution_counts and self.current_insn_address in self.execution_counts:
+                    count = self.execution_counts[self.current_insn_address]
+                if len(self.current_state.instruction) != 0:
+                    self.viewer.UpdateLineRange(self.current_insn_address, len(self.current_state.instruction), SINGLE_DATA_LINE,
+                                        ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
+                                                                                            self.addr_len,
+                                                                                            self.current_state.instruction,
+                                                                                            len(self.current_state.instruction),
+                                                                                            count,
+                                                                                            True),
+                                                                                            None, None)
+
+
+
         # Set status bar memory range label.
         self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
         self.HighlightLines()
@@ -1428,9 +1489,13 @@ class TTE_MemoryViewer:
 
         # Format the bytearray for output via idaapi.msg
         hex_dump = ', '.join(f"0x{byte:02x}" for byte in exported_bytes)
+        int_dump = int.from_bytes(exported_bytes, byteorder='big' if self.is_be else 'little',  signed=False)
+        str_dump = exported_bytes.decode('utf-8', 'ignore')
 
         output_msg = f"--- Exported Memory Data (0x{start_addr:X} - 0x{end_addr:X}) ---\n"
         output_msg += f"Hex: {hex_dump}\n"
+        output_msg += f"Int: {int_dump:X}\n"
+        output_msg += f"Str: {str_dump}\n"
         output_msg += f"Length: {len(exported_bytes)} bytes\n"
         output_msg += "----------------------------------------\n"
 
@@ -2114,7 +2179,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
         # Update Disassembly Viewer
-        self.disassembly_viewer.LoadState(target_state_id, target_full_state.instruction_address, target_full_state.memory_pages)
+        self.disassembly_viewer.LoadState(target_state, target_full_state.instruction_address, target_full_state.memory_pages)
         self.disassembly_viewer.ApplyStatePatchesInViewer(mem_patch, page_diff)
         if self.follow_current_instruction or self.current_state_id is None: # Only jump if it's the first load or follow is enabled
             self.disassembly_viewer.JumpTo(target_full_state.instruction_address)
