@@ -578,6 +578,7 @@ class ColorfulLineGenerator():
 
     @staticmethod
     def GenerateDisassemblyCodeLine(address, address_len, value, value_len, execution_counts) -> str:
+        # TODO: Improve the instruction display support for SMC(Self Modifying Code) technology
         if execution_counts == 0:
             execution_counts_str = "    "
         elif execution_counts == 1:
@@ -973,6 +974,7 @@ class TTE_DisassemblyViewer():
         assert self.memory_pages_list and self.execution_counts, "State data not loaded"
 
         self.viewer.ClearLines()
+        self.codelines_dict.clear()
         current_addr = range_start
         for start_addr, (perm, data) in self.memory_pages_list:
             assert len(data) == PAGE_SIZE
@@ -2054,6 +2056,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         for chooser in self.subchooser_list:
             chooser.Refresh()
 
+
     def SwitchState(self, target_state_id: str):
         assert self.state_list is not None, "No state_list loaded"
         target_state_idx = next((i for i, (x, y) in enumerate(self.state_list) if x == target_state_id), -1)
@@ -2111,7 +2114,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
 
         # Update Disassembly Viewer
-
         self.disassembly_viewer.LoadState(target_state_id, target_full_state.instruction_address, target_full_state.memory_pages)
         self.disassembly_viewer.ApplyStatePatchesInViewer(mem_patch, page_diff)
         if self.follow_current_instruction or self.current_state_id is None: # Only jump if it's the first load or follow is enabled

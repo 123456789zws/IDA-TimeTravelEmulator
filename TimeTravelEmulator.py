@@ -410,6 +410,8 @@ class EmuSettings():
     log_level: int = logging.WARNING
     log_file_path: Optional[str] = None
 
+    preprocessing_code: str = ""
+
 
 class EmuSettingsForm(idaapi.Form):
 
@@ -450,7 +452,7 @@ EmuTrace: Emulator Settings
 
 
             Advanced Configs:
-            <Open settings dialog:{b_open_settings_dialog}>
+            <Set custom preprocessing code:{b_set_preprocessing_code}>
 
             ''',
             {
@@ -471,10 +473,11 @@ EmuTrace: Emulator Settings
                 ),
                 'i_log_file_path': self.FileInput(save=True, swidth=30),
 
-                'b_open_settings_dialog': self.ButtonInput(self._open_settings_dialog)
+                'b_set_preprocessing_code': self.ButtonInput(self._add_preprocessing_code)
             }
          )
         self.Compile()
+        self.preprocessing_code: str = "mu = emu_executor.get_mu()"
 
     def _on_form_change(self, fid: int):
         return 1
@@ -486,12 +489,76 @@ EmuTrace: Emulator Settings
 
         self._set_emu_range(target_func.start_ea, target_func.end_ea)
 
-    def _open_settings_dialog(self, code = 0):
-        pass
-        # TODO open settings dialog
+    def _add_preprocessing_code(self, code = 0):
 
+        class PreprocessingCodeForm(ida_kernwin.Form):
+            def __init__(self, default_multiline_text: str = ""):
+                self.i_multiline_text: Optional[ida_kernwin.Form.MultiLineTextControl] = None
+                self.i_load_file: Optional[ida_kernwin.Form.ButtonInput] = None
+                self.i_save_file: Optional[ida_kernwin.Form.ButtonInput] = None
+                super().__init__(
+                    r"""STARTITEM {id:i_multiline_text}
+BUTTON YES* OK
+BUTTON NO Cancel
+Preprocessing Code Input
 
+        {FormChangeCb}
+        <##Enter your text here:{i_multiline_text}>
+        <Load from file:{i_load_file}> <Save to file:{i_save_file}>
+        """, {
+                    'FormChangeCb': self.FormChangeCb(self.OnFormChange),
+                    'i_multiline_text': self.MultiLineTextControl(text=default_multiline_text),
+                    'i_load_file': self.ButtonInput(self.OnLoadFile),
+                    'i_save_file': self.ButtonInput(self.OnSaveFile),
+                })
+                self.Compile()
+                self.user_input_text = ""
 
+            def OnLoadFile(self, code=0):
+                file_path = ida_kernwin.ask_file(False, "*.*", "Select a file to load")
+                if file_path:
+                    try:
+                        with open(file_path, 'r') as f:
+                            content = f.read()
+                            textctrl = ida_kernwin.textctrl_info_t(content)
+                            self.SetControlValue(self.i_multiline_text, textctrl)
+                            idaapi.msg(f"Loaded content from {file_path}\n")
+                    except Exception as e:
+                        ida_kernwin.warning(f"Failed to load file: {e}")
+                else:
+                    idaapi.msg("No file selected for loading.\n")
+
+            def OnSaveFile(self, code=0):
+                file_path = ida_kernwin.ask_file(True, "*.*", "Select a file to save to")
+                if file_path:
+                    try:
+                        textctrl = self.GetControlValue(self.i_multiline_text)
+                        with open(file_path, 'w') as f:
+                            f.write(textctrl.text)
+                        idaapi.msg(f"Saved content to {file_path}\n")
+                    except Exception as e:
+                        ida_kernwin.warning(f"Failed to save file: {e}")
+                else:
+                    idaapi.msg("No file selected for saving.\n")
+
+            def OnFormChange(self, fid):
+                assert self.i_multiline_text is not None, "i_multiline_text is not initialized"
+
+                if fid == -2: # OnFormChange is called with -2 on form close
+                    self.user_input_text = self.GetControlValue(self.i_multiline_text).text
+                return 1
+
+            def get_user_text(self):
+                """
+                Public method to retrieve the user's input after the form is closed.
+                """
+                return self.user_input_text
+
+        form = PreprocessingCodeForm(self.preprocessing_code)
+        ok = form.Execute()
+        if ok == 1:
+            self.preprocessing_code = form.get_user_text()
+        form.Free()
 
 
     def _set_emu_range(self, start: int = -1, end: int = -1):
@@ -548,6 +615,8 @@ EmuTrace: Emulator Settings
         settings.is_jump_over_syscalls = self.r_jump_over_syscalls.checked # type: ignore
         is_log_enabled = self.r_log.checked # type: ignore
 
+        settings.preprocessing_code = self.preprocessing_code
+
         log_level_map = {
             0: logging.DEBUG,
             1: logging.INFO,
@@ -570,7 +639,7 @@ DEFAULT_STACK_POINT_VALUE = 0x70000000
 DEFAULT_BASE_POINT_VALUE = DEFAULT_STACK_POINT_VALUE
 
 
-class EmuExecuter():
+class EmuExecutor():
     """
     A simulation executor class is used to manage the operation of the entire program, including initialization, loading, running, saving, etc.
     """
@@ -584,7 +653,7 @@ class EmuExecuter():
         self.unicorn_arch, self.unicorn_mode = UNICORN_ARCH_MAP[self.arch]
         self.insn_pointer = ARCH_TO_INSN_POINTER_MAP[self.arch]
         self.settings = settings
-        tte_log_info("Create EmuExecuter: arch-{}, mode-{}".format(self.unicorn_arch, self.unicorn_mode))
+        tte_log_info("Create EmuExecutor: arch-{}, mode-{}".format(self.unicorn_arch, self.unicorn_mode))
 
         self.loaded_pages: Set[int] = set() # Set(page_start)
 
@@ -596,7 +665,7 @@ class EmuExecuter():
         Initialize Unicorn emulation, the method must be called before calling other methods.
         """
         if self._is_initialized:
-            tte_log_info("EmuExecuter already initialized.")
+            tte_log_info("EmuExecutor already initialized.")
             return
 
 
@@ -613,6 +682,25 @@ class EmuExecuter():
         self._hook_mem_unmapped()
 
         self._is_initialized = True
+
+    @staticmethod
+    def execute_preprocessing_code(preprocessing_code, emu_executor: 'EmuExecutor') -> int:
+        """
+        Execute the preprocessing code.
+        """
+        if(len(preprocessing_code) == 0):
+            return 1
+        idaapi.msg("Executing preprocessing code...\n")
+        try:
+            exec(preprocessing_code)
+        except Exception as e:
+            print(f"Error executing preprocessing code: {e}")
+            return idaapi.ask_yn(0, f"Error executing preprocessing code: {e}\nDo you want to continue?")
+        return 1
+
+    def get_mu(self):
+        return self.mu
+
 
     def _is_memory_mapped(self, address) -> bool:
         # return any(map_start <= address < map_end for map_start, map_end, _ in self.mu.mem_regions())
@@ -723,9 +811,9 @@ class EmuExecuter():
     CUSTOM_HOOK_MEM_MAP = 0
     CUSTOM_HOOK_EXECUTE_END = 1
     def add_custom_hook(self, htype: int, callback):
-        if htype == EmuExecuter.CUSTOM_HOOK_MEM_MAP:
+        if htype == EmuExecutor.CUSTOM_HOOK_MEM_MAP:
             self.emu_map_mem_callback.append(callback)
-        elif htype == EmuExecuter.CUSTOM_HOOK_EXECUTE_END:
+        elif htype == EmuExecutor.CUSTOM_HOOK_EXECUTE_END:
             self.emu_run_end_callback.append(callback)
         else:
             raise AssertionError("Invalid hook type")
@@ -759,7 +847,7 @@ class EmuExecuter():
         End the emulate
         """
         if not self._is_initialized:
-            tte_log_info("EmuExecuter not initialized.")
+            tte_log_info("EmuExecutor not initialized.")
             return
 
         self.mu.emu_stop()
@@ -1315,18 +1403,18 @@ class EmuStateManager():
 
 class EmuTracer():
     """
-    Class for tracking EmuExecuter and creating state snapshots in EmuStateManager when appropriate.
+    Class for tracking EmuExecutor and creating state snapshots in EmuStateManager when appropriate.
     """
     @dataclass
     class state_buffer_t(object):
         instruction: bytes
         memory_patches: List[Tuple[int, int, bytes]]
 
-    def __init__(self, executer:EmuExecuter, state_manager:EmuStateManager) -> None:
-        self.executer: EmuExecuter = executer
+    def __init__(self, executor:EmuExecutor, state_manager:EmuStateManager) -> None:
+        self.executor: EmuExecutor = executor
         self.state_manager: EmuStateManager = state_manager
 
-        self.arch = self.executer.arch
+        self.arch = self.executor.arch
         self.capstone_arch, self.capstone_mode= CAPSTONE_ARCH_MAP[self.arch]
         self.md = Cs(self.capstone_arch, self.capstone_mode)
 
@@ -1341,19 +1429,19 @@ class EmuTracer():
 
 
     def _trace_code(self):
-        # self.executer.add_mu_hook(UC_HOOK_MEM_READ, self.trace_mem_read)
-        self.executer.add_mu_hook(UC_HOOK_CODE, self.cb_catch_insn_execution)
-        self.executer.add_mu_hook(UC_HOOK_CODE, self.cb_create_emu_state)
+        # self.executor.add_mu_hook(UC_HOOK_MEM_READ, self.trace_mem_read)
+        self.executor.add_mu_hook(UC_HOOK_CODE, self.cb_catch_insn_execution)
+        self.executor.add_mu_hook(UC_HOOK_CODE, self.cb_create_emu_state)
 
 
     def _trace_mem_write(self):
-        self.executer.add_mu_hook(UC_HOOK_MEM_WRITE, self.cb_log_mem_write)
-        self.executer.add_mu_hook(UC_HOOK_MEM_WRITE, self.cb_catch_mem_write)
+        self.executor.add_mu_hook(UC_HOOK_MEM_WRITE, self.cb_log_mem_write)
+        self.executor.add_mu_hook(UC_HOOK_MEM_WRITE, self.cb_catch_mem_write)
 
 
     def _trace_custom_operate(self):
-        self.executer.add_custom_hook(EmuExecuter.CUSTOM_HOOK_EXECUTE_END, self.cb_create_emu_end_state)
-        self.executer.add_custom_hook(EmuExecuter.CUSTOM_HOOK_MEM_MAP, self.cb_mark_mem_map)
+        self.executor.add_custom_hook(EmuExecutor.CUSTOM_HOOK_EXECUTE_END, self.cb_create_emu_end_state)
+        self.executor.add_custom_hook(EmuExecutor.CUSTOM_HOOK_MEM_MAP, self.cb_mark_mem_map)
 
 
 
@@ -1384,7 +1472,7 @@ class EmuTracer():
         self.state_manager.create_state(uc,
                                         self.state_buffer.instruction,
                                         address,
-                                        self.executer.get_mem_regions(),
+                                        self.executor.get_mem_regions(),
                                         self.state_buffer.memory_patches)
 
         # Save the current state to the state buffer
@@ -1409,7 +1497,7 @@ class EmuTracer():
         self.state_manager.create_state(uc,
                                         b"",
                                         insn_pointer,
-                                        self.executer.get_mem_regions(),
+                                        self.executor.get_mem_regions(),
                                         self.state_buffer.memory_patches)
 
     def cb_mark_mem_map(self, uc):
@@ -1495,15 +1583,19 @@ def StartTimeTravelEmulator(settings: EmuSettings) -> None:
     """
     TTE_Logger().start(settings.log_level, settings.log_file_path)
 
-    emu_executer = EmuExecuter(settings)
-    emu_executer.init()
+    emu_executor = EmuExecutor(settings)
+    emu_executor.init()
 
     emu_statesmanager = EmuStateManager()
-    emu_tracer = EmuTracer(emu_executer, emu_statesmanager)
+    emu_tracer = EmuTracer(emu_executor, emu_statesmanager)
     emu_tracer.init_hook()
 
-    emu_executer.run()
-    emu_executer.destroy()
+    continues = emu_executor.execute_preprocessing_code(settings.preprocessing_code, emu_executor)
+    if continues != 1:
+        return
+
+    emu_executor.run()
+    emu_executor.destroy()
 
     import sys
     sys.path.append("F:/Projects/IDA-TimeTravelEmulator")
