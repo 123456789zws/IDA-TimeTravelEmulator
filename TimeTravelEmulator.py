@@ -121,6 +121,13 @@ UNICORN_REGISTERS_MAP = {
     }
 }
 
+IP_REG_NAME_MAP = {
+    "x64": "RIP",
+    "x32": "EIP"
+}
+
+
+
 
 IDA_PERM_TO_UC_PERM_MAP = {
     ida_segment.SEGPERM_EXEC : UC_PROT_EXEC,
@@ -169,7 +176,6 @@ def get_arch_x64_reg_value() -> Dict[int, int]:
     regs_map =  UNICORN_REGISTERS_MAP[arch]
     for reg_name, uc_reg_const in regs_map.items():
         if reg_name == "Rflags":
-            print(f"rflag")
             flag_positions = {
                 "CF": 0,    # Carry Flag
                 "PF": 2,    # Parity Flag
@@ -202,7 +208,6 @@ def get_arch_x64_reg_value() -> Dict[int, int]:
                                 rflags_value |= (1 << bit_pos)
                 except Exception as e:
                     continue
-            print(f"RFLAGS: 0x{rflags_value:016X}")
             result[uc_reg_const] = rflags_value
         elif reg_name in ["FS", "GS"]:
             continue
@@ -216,6 +221,61 @@ def get_arch_x64_reg_value() -> Dict[int, int]:
     return result
 
 
+
+def get_arch_x86_reg_value() -> Dict[int, int]:
+    if not idaapi.is_debugger_on():
+        return {}
+    arch = get_arch()
+    if arch not in UNICORN_REGISTERS_MAP:
+        return {}
+
+    result: Dict[int, int] = {}
+    regs_map =  UNICORN_REGISTERS_MAP[arch]
+    for reg_name, uc_reg_const in regs_map.items():
+        if reg_name == "Eflags":
+            flag_positions = {
+                "CF": 0,    # Carry Flag
+                "PF": 2,    # Parity Flag
+                "AF": 4,    # Auxiliary Carry Flag
+                "ZF": 6,    # Zero Flag
+                "SF": 7,    # Sign Flag
+                "TF": 8,    # Trap Flag
+                "IF": 9,    # Interrupt Enable Flag
+                "DF": 10,   # Direction Flag
+                "OF": 11,   # Overflow Flag
+                "IOPL": 12, # I/O Privilege Level (Usually two bit)
+                "NT": 14,   # Nested Task Flag
+                "RF": 16,   # Resume Flag
+                "VM": 17,   # Virtual-8086 Mode Flag
+                "AC": 18,   # Alignment Check / Access Control Flag
+                "VIF": 19,  # Virtual Interrupt Flag
+                "VIP": 20,  # Virtual Interrupt Pending
+                "ID": 21    # ID Flag
+            }
+            rflags_value = 0
+            for flag_name, bit_pos in flag_positions.items():
+                try:
+                    flag_val = ida_dbg.get_reg_val(flag_name)
+
+                    if flag_val is not None:
+                        if flag_name == "IOPL":
+                            rflags_value |= ((flag_val & 0x3) << bit_pos)
+                        else:
+                            if flag_val == 1:
+                                rflags_value |= (1 << bit_pos)
+                except Exception as e:
+                    continue
+            result[uc_reg_const] = rflags_value
+        elif reg_name in ["CS", "SS", "DS", "ES", "FS", "GS"]:
+            continue
+        else:
+            try:
+                reg_value = ida_dbg.get_reg_val(reg_name)
+                result[uc_reg_const] = reg_value
+            except Exception as e:
+                tte_log_err(f"Error getting register value for {reg_name}: {e}")
+                pass
+    return result
 
 
 
@@ -529,7 +589,7 @@ EmuTrace: Emulator Settings
             }
          )
         self.Compile()
-        self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
+        self.set_default_values()
 
     def _on_form_change(self, fid: int):
         assert self.r_load_register is not None, "r_load_register is not initialized"
@@ -539,8 +599,17 @@ EmuTrace: Emulator Settings
                 self.EnableField(self.r_load_register, False)
             else:
                 self.EnableField(self.r_load_register, True)
-
         return 1
+
+    def set_default_values(self):
+        assert self.r_load_register is not None, "r_load_register is not initialized"
+
+        self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
+
+        if idaapi.is_debugger_on():
+            self.r_load_register.checked = True
+
+
 
     def _open_select_function_dialog(self, code = 0):
         target_func =  ida_kernwin.choose_func("Select target function range",1)
@@ -854,9 +923,9 @@ class EmuExecutor():
             while(self._is_memory_mapped(DEFAULT_STACK_POINT_VALUE + offset)):
                 offset += 0x1000000
             if self.unicorn_mode == UC_MODE_64:
-                stack_point, frame_point  = UNICORN_REGISTERS_MAP[self.arch]['RSP'], UNICORN_REGISTERS_MAP[self.arch]['RSP']
+                stack_point, frame_point  = UNICORN_REGISTERS_MAP[self.arch]['RSP'], UNICORN_REGISTERS_MAP[self.arch]['RBP']
             elif self.unicorn_mode == UC_MODE_32:
-                stack_point, frame_point  = UNICORN_REGISTERS_MAP[self.arch]['ESP'], UNICORN_REGISTERS_MAP[self.arch]['ESP']
+                stack_point, frame_point  = UNICORN_REGISTERS_MAP[self.arch]['ESP'], UNICORN_REGISTERS_MAP[self.arch]['EBP']
             else:
                 raise AssertionError("Invalid unicorn mode")
 
@@ -872,7 +941,13 @@ class EmuExecutor():
                 else:
                     tte_log_info(f"Init regs: Skip register ID {reg_id} value: None")
 
-        # TODO support x86_32
+        elif self.settings.is_load_registers and self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_32:
+            for reg_id, reg_value in get_arch_x86_reg_value().items():
+                if reg_value is not None:
+                    self.mu.reg_write(reg_id, reg_value)
+                    tte_log_info(f"Init regs: Sets register ID {reg_id} value: 0x{reg_value:X}")
+                else:
+                    tte_log_info(f"Init regs: Skip register ID {reg_id} value: None")
 
 
 
@@ -1746,8 +1821,12 @@ class TimeTravelEmulator(idaapi.plugin_t):
             return ea_addr, ea_addr_end
         else:
             ea = idaapi.get_screen_ea()
-            start = idc.get_func_attr(ea,0)
-            end = idc.get_fchunk_attr(ea,8)
+            if ida_dbg.is_debugger_on():
+                start = ida_dbg.get_reg_val(IP_REG_NAME_MAP[get_arch()])
+                end =  idc.get_fchunk_attr(ea,8)
+            else:
+                start = idc.get_func_attr(ea,0)
+                end = idc.get_fchunk_attr(ea,8)
             return start, end
 
 
