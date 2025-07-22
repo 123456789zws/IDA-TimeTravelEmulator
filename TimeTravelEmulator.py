@@ -635,11 +635,14 @@ BUTTON NO Cancel
 Preprocessing Code Input
 
         {FormChangeCb}
-        <##Enter your text here:{i_multiline_text}>
+        <##Enter your preprocessing code here:{i_multiline_text}>
         <Load from file:{i_load_file}> <Save to file:{i_save_file}>
         """, {
                     'FormChangeCb': self.FormChangeCb(self.OnFormChange),
-                    'i_multiline_text': self.MultiLineTextControl(text=default_multiline_text),
+                    'i_multiline_text': self.MultiLineTextControl(text=default_multiline_text,
+                                                                  flags = ida_kernwin.Form.MultiLineTextControl.TXTF_FIXEDFONT | \
+                                                                  ida_kernwin.Form.MultiLineTextControl.TXTF_ACCEPTTABS,
+                                                                  tabsize = 4),
                     'i_load_file': self.ButtonInput(self.OnLoadFile),
                     'i_save_file': self.ButtonInput(self.OnSaveFile),
                 })
@@ -846,7 +849,6 @@ class EmuExecutor():
         :param map_start: Start address of the mapping. Must be page aligned.
         :param map_size: Size of the mapping. Must be page aligned.
         """
-
         for page_start in range(map_start, map_start + map_size, PAGE_SIZE):
             if self._is_memory_mapped(page_start):
                 continue
@@ -881,6 +883,8 @@ class EmuExecutor():
 
     def _map_and_load_binary(self, start_ea, end_ea) -> None:
         tte_log_dbg(f"Start map and load binary: 0x{start_ea:X}~0x{end_ea:X}")
+
+        end_ea = min(end_ea, start_ea + PAGE_SIZE * 8)
         map_start = start_ea & PAGE_MASK
         map_size = (end_ea - map_start + PAGE_SIZE - 1) & PAGE_MASK
 
