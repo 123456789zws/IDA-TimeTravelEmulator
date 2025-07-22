@@ -42,20 +42,6 @@ BYTE_CHANGE_HIGHTLIGHT = ida_kernwin.CK_EXTRA11
 
 
 
-# Define page size and page mask, usually 4 kb
-PAGE_SIZE = 0x1000
-PAGE_MASK = ~(PAGE_SIZE - 1)
-
-# Define default page permission
-DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
-
-
-
-
-
-
-
-
 
 
 UNICORN_ARCH_MAP =      {
@@ -168,6 +154,7 @@ def get_arch() -> str:
         return ""
     return IDA_PROC_TO_ARCH_MAP[(proc_name, proc_bitness)]
 
+
 def get_arch_x64_reg_value() -> Dict[int, int]:
     if not idaapi.is_debugger_on():
         return {}
@@ -224,7 +211,6 @@ def get_arch_x64_reg_value() -> Dict[int, int]:
     return result
 
 
-
 def get_arch_x86_reg_value() -> Dict[int, int]:
     if not idaapi.is_debugger_on():
         return {}
@@ -279,10 +265,6 @@ def get_arch_x86_reg_value() -> Dict[int, int]:
                 tte_log_err(f"Error getting register value for {reg_name}: {e}")
                 pass
     return result
-
-
-
-
 
 
 def get_page_slice(page_start: int, page_size: int) -> List[Tuple[int, int]]:
@@ -399,26 +381,6 @@ def apply_bytes_patch(
 
     updated_dict.update(new_entries)
     return updated_dict
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -596,6 +558,7 @@ EmuTrace: Emulator Settings
 
     def _on_form_change(self, fid: int):
         assert self.r_load_register is not None, "r_load_register is not initialized"
+        assert self.r_jump_over_syscalls is not None, "r_jump_over_syscalls is not initialized"
 
         # Init
         if fid == -1:
@@ -603,6 +566,8 @@ EmuTrace: Emulator Settings
                 self.EnableField(self.r_load_register, False)
             else:
                 self.EnableField(self.r_load_register, True)
+            self.EnableField(self.r_jump_over_syscalls, False) # [ ] TODO: Implement jump over syscalls
+
 
         # Click Yes
         elif fid == -2:
@@ -773,10 +738,15 @@ Preprocessing Code Input
 
 
 
+# Define page size and page mask, usually 4 kb
+PAGE_SIZE = 0x1000
+PAGE_MASK = ~(PAGE_SIZE - 1)
+
+# Define default page permission
+DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
 
 
-
-
+# Define default stack and base point values
 DEFAULT_STACK_POINT_VALUE = 0x70000000
 DEFAULT_BASE_POINT_VALUE = DEFAULT_STACK_POINT_VALUE
 
@@ -964,19 +934,6 @@ class EmuExecutor():
                     tte_log_info(f"Init regs: Skip register ID {reg_id} value: None")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     def add_mu_hook(self, htype: int, callback, user_data = None, begin: int = 1, end: int = 0) -> int:
         return self.mu.hook_add(htype, callback, user_data, begin, end)
 
@@ -1030,8 +987,14 @@ class EmuExecutor():
         self._is_initialized = False
 
 
+StateList = List[Tuple[str, "EmuState"]]
+RegistersDict = Dict[str, int] # {reg_name: reg_value}
+RegistersPatchDict = Dict[str, int] # {reg_name: patch_reg_value}
+MemoryPatchList= List[Tuple[int, int, bytes]] # [(page_start, page_size, patch_bytes)]
+MemoryPagesDict = Dict[int, Tuple[int, bytearray]] # {page_start: (page_permissions, page_data)}
+MemoryBsdiffPatchDict = Dict[int, Tuple[int, bytes]] # {page_start: (page_permissions, bsdiff_patch_bytes)}
 
-
+RegistersDiffsDict = Dict[str, Tuple[int, int]] # {reg_name: (reg_value, patch_value)}
 
 
 
@@ -1066,7 +1029,7 @@ class EmuState(ABC):
         self.instruction = instruction
         self.execution_count = execution_count
 
-        self.memory_patches: Optional[List[Tuple[int, int, bytes]]] = []
+        self.memory_patches: Optional[MemoryPatchList] = []
 
     @abstractmethod
     def generate_full_state(self, states_dict: Dict[str, 'EmuState']) -> Optional['FullEmuState']:
@@ -1087,15 +1050,15 @@ class FullEmuState(EmuState):
                          execution_count)
         self.type = EmuState.STATE_TYPE_FULL
 
-        self.registers_map: Dict[str, int] = {} # {reg_name: reg_value}
-        self.memory_patches: Optional[List[Tuple[int, int, bytes]]] = None # [(page_start, page_size, patch_bytes)]
-        self.memory_pages: Dict[int, Tuple[int, bytearray]] = {} # {page_start: (page_permissions, page_data)}
+        self.registers_map: RegistersDict = {} # {reg_name: reg_value}
+        self.memory_patches: Optional[MemoryPatchList] = None # [(page_start, page_size, patch_bytes)]
+        self.memory_pages: MemoryPagesDict = {} # {page_start: (page_permissions, page_data)}
 
 
     def set_data(self,
-                 registers_map: Dict[str, int],
-                 memory_patches: Optional[List[Tuple[int, int, bytes]]],
-                 memory_pages: Dict[int, Tuple[int, bytearray]]) -> None:
+                 registers_map: RegistersDict,
+                 memory_patches: Optional[MemoryPatchList],
+                 memory_pages: MemoryPagesDict) -> None:
         """
         Set the full state of the emulator.
         :param registers: Dictionary of register values.
@@ -1125,19 +1088,19 @@ class HeavyPatchEmuState(EmuState):
 
         self.base_full_state_id: Optional[str] = None
 
-        self.reg_patches: Dict[str, int] = {} # {reg_name: patch_value}
-        self.memory_patches: Optional[List[Tuple[int, int, bytes]]] = None # [(page_start, page_size, patch_bytes)]
+        self.reg_patches: RegistersPatchDict = {} # {reg_name: patch_value}
+        self.memory_patches: Optional[MemoryPatchList] = None # [(page_start, page_size, patch_bytes)]
 
         # Memory patch stores binary differential data generated by bsdiff4
-        self.mem_bsdiff_patches: Dict[int, Tuple[int, bytes]] = {} # {page_start: (page_permissions, bsdiff_patch_bytes)}
-        self.new_pages: Dict[int, Tuple[int, bytearray]] = {} # {page_start: (page_permissions, page_data)}
+        self.mem_bsdiff_patches: MemoryBsdiffPatchDict = {} # {page_start: (page_permissions, bsdiff_patch_bytes)}
+        self.new_pages: MemoryPagesDict = {} # {page_start: (page_permissions, page_data)}
 
     def set_data(self,
                  base_full_state_id: str,
-                 reg_patches: Dict[str, int],
-                 memory_patches: Optional[List[Tuple[int, int, bytes]]],
-                 mem_bsdiff_patches: Dict[int, Tuple[int, bytes]],
-                 new_pages: Dict[int, Tuple[int, bytearray]]):
+                 reg_patches: RegistersPatchDict,
+                 memory_patches: Optional[MemoryPatchList],
+                 mem_bsdiff_patches: MemoryBsdiffPatchDict,
+                 new_pages: MemoryPagesDict):
         """
         Sets the patch status of the emulator.
 
@@ -1185,14 +1148,14 @@ class LightPatchEmuState(EmuState):
 
         self.base_full_state_id: Optional[str] = None
 
-        self.reg_patches: Dict[str, int] = {} # {reg_name: patch_value}
-        self.memory_patches: List[Tuple[int, int, bytes]] = [] # List[[address, size, value]...]
+        self.reg_patches: RegistersPatchDict = {} # {reg_name: patch_value}
+        self.memory_patches: MemoryPatchList = [] # List[[address, size, value]...]
 
 
     def set_data(self,
                  base_full_state_id: str,
-                 reg_patches: Dict[str, int],
-                 memory_patches: List[Tuple[int, int, bytes]]):
+                 reg_patches: RegistersPatchDict,
+                 memory_patches: MemoryPatchList):
         """
         Set the patch state of the emulator.
         :param reg_patches: Dictionary of register patches.
@@ -1207,7 +1170,11 @@ class LightPatchEmuState(EmuState):
 
     def generate_full_state(self, states_dict: Dict[str, EmuState]) -> Optional[FullEmuState]:
         tte_log_dbg(f"Generate full state for light path state {self.state_id}")
-        target_state = FullEmuState(self.state_id, self.prev_state_id, self.instruction, self.instruction_address, self.execution_count)
+        target_state = FullEmuState(self.state_id,
+                                    self.prev_state_id,
+                                    self.instruction,
+                                    self.instruction_address,
+                                    self.execution_count)
         accumulated_memory_patches_to_apply = self.memory_patches.copy()
         assert self.base_full_state_id is not None, "Generate full State: Cannot generate full state: base state id not set."
         base_full_state: Optional[EmuState] = states_dict.get(self.base_full_state_id)
@@ -1290,7 +1257,7 @@ class EmuStateManager():
         return self.STATE_ID_FORMAT.format(address=instruction_address, count=count)
 
 
-    def _read_memory_pages(self, uc, memory_regions: Iterator[Tuple[int, int, int]]) -> Dict[int, Tuple[int, bytearray]]:
+    def _read_memory_pages(self, uc, memory_regions: Iterator[Tuple[int, int, int]]) -> MemoryPagesDict:
         """
         Read paging memory from Unicorn instance.
 
@@ -1299,7 +1266,7 @@ class EmuStateManager():
         :return: A dictionary of memory pages, where the key is the start address of
          the page and the value is the page's permission and data.
         """
-        memory_pages: Dict[int, Tuple[int, bytearray]] = {}
+        memory_pages: MemoryPagesDict = {}
         for start, end, permission in memory_regions:
             size = end - start + 1
             try:
@@ -1318,9 +1285,9 @@ class EmuStateManager():
                            new_state_id: str,
                            instruction: bytes,
                            instruction_address:int,
-                           current_registers_map: Dict[str, int],
-                           memory_patches: List[Tuple[int, int, bytes]],
-                           current_memory_pages: Dict[int, Tuple[int, bytearray]]) -> None:
+                           current_registers_map: RegistersDict,
+                           memory_patches: MemoryPatchList,
+                           current_memory_pages: MemoryPagesDict) -> None:
         new_state = FullEmuState(new_state_id,
                                  self.last_state_id,
                                  instruction,
@@ -1339,8 +1306,8 @@ class EmuStateManager():
                                   new_state_id: str,
                                   instruction: bytes,
                                   instruction_address:int,
-                                  current_registers_map: Dict[str, int],
-                                  memory_patches: List[Tuple[int, int, bytes]],
+                                  current_registers_map: RegistersDict,
+                                  memory_patches: MemoryPatchList,
                                   current_memory_pages: Dict[int, Tuple[int,bytearray]]) -> None:
         assert self.last_full_state_id is not None, "No full base state available for patch creation."
         assert self.last_state_id is not None, "No previous state available for patch creation."
@@ -1373,8 +1340,8 @@ class EmuStateManager():
                                   new_state_id: str,
                                   instruction: bytes,
                                   instruction_address:int,
-                                  current_registers_map: Dict[str, int],
-                                  memory_patches: List[Tuple[int, int, bytes]]) -> None:
+                                  current_registers_map: RegistersDict,
+                                  memory_patches: MemoryPatchList) -> None:
         assert self.last_full_state_id is not None, "No full base state available for patch creation."
         assert self.last_state_id is not None, "No previous state available for patch creation."
 
@@ -1410,13 +1377,13 @@ class EmuStateManager():
         return self.states_dict.get(state_id, None)
 
 
-    def get_state_list(self) -> List[Tuple[str, EmuState]]:
+    def get_state_list(self) -> StateList:
         """
         Get a list of all EmuState objects with their ID, instruction address, instruction, and execution count.
 
         :return: A list of tuples containing the state ID, instruction address, instruction, and execution count.
         """
-        result: List[Tuple[str, EmuState]] = []
+        result: StateList = []
         for state_id, state in self.states_dict.items():
             result.append((state_id, state))
         return result
@@ -1448,7 +1415,7 @@ class EmuStateManager():
                      instruction: bytes,
                      instruction_address: int,
                      memory_regions: Iterator[Tuple[int, int, int]],
-                     memory_patches: List[Tuple[int, int, bytes]]) -> None:
+                     memory_patches: MemoryPatchList) -> None:
         """
         Create a new EmuState object based on the current state of the Unicorn instance.
         Decide whether to create a full state or a patch state based on the difference size or number of steps.
@@ -1497,7 +1464,7 @@ class EmuStateManager():
                                            memory_patches)
 
 
-    def _get_regs_map(self, state) -> Dict[str, int]:
+    def _get_regs_map(self, state) -> RegistersDict:
         if state.type in [EmuState.STATE_TYPE_LIGHT_PATCH, EmuState.STATE_TYPE_HEAVY_PATCH]:
             base_state = self.get_state(state.base_full_state_id)
             assert base_state, f"Base state not found"
@@ -1537,9 +1504,9 @@ class EmuStateManager():
             tte_log_warn(f"Could not generate full state for '{state2.state_id}'. Comparison aborted.")
             return
 
-        regs_diff: Dict[str, Tuple[int, int]] = {}
+        regs_diff: RegistersDiffsDict = {}
         def catch_regs_diff(regs_map1, regs_map2):
-            result: Dict[str, Tuple[int, int]] = {}
+            result: RegistersDiffsDict = {}
             for reg_name in regs_map1:
                 if regs_map1[reg_name] != regs_map2[reg_name]:
                     result[reg_name] = (regs_map1[reg_name], regs_map2[reg_name])
@@ -1585,7 +1552,7 @@ class EmuTracer():
     @dataclass
     class state_buffer_t(object):
         instruction: bytes
-        memory_patches: List[Tuple[int, int, bytes]]
+        memory_patches: MemoryPatchList
 
     def __init__(self, executor:EmuExecutor, state_manager:EmuStateManager) -> None:
         self.executor: EmuExecutor = executor
@@ -1622,12 +1589,6 @@ class EmuTracer():
 
 
 
-
-    def cb_log_mem_write(self, uc, access, address, size, value, user_data):
-        tte_log_dbg(f"Memory write: access={access}, address=0x{address:X}, size={size}, value=0x{value:X}, insn={uc.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch]):X}")
-        return True
-
-
     def cb_catch_insn_execution(self, uc, address, size, user_data) -> bool:
         tte_log_dbg(message=f"Tracing instruction at 0x{address:X}, instruction size = {size:X}")
         _, _, opcode, operand = next(self.md.disasm_lite(uc.mem_read(address, size), 0))
@@ -1655,6 +1616,11 @@ class EmuTracer():
         # Save the current state to the state buffer
         self.state_buffer.memory_patches = []
 
+        return True
+
+
+    def cb_log_mem_write(self, uc, access, address, size, value, user_data):
+        tte_log_dbg(f"Memory write: access={access}, address=0x{address:X}, size={size}, value=0x{value:X}, insn={uc.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch]):X}")
         return True
 
 
@@ -1712,7 +1678,6 @@ class InstrctionParser():
         self.arch = get_arch()
         self.capstone_arch, self.capstone_mode = CAPSTONE_ARCH_MAP[self.arch]
         self.md = Cs(self.capstone_arch, self.capstone_mode)
-
 
 
     def parse_instruction(self, insn_bytes: bytes) -> str:
@@ -2318,6 +2283,10 @@ class ColorfulLineGenerator():
         """
         Generates a colored memory dump line.
         Example: 0x00401000  48 83 EC 28 48 8B C4 48 | H. .(.H. .H
+
+        :return: Returns a tuple (colored_line, hightlight_byte_indices)
+            colored_line: The colored memory dump line.
+            hightlight_byte_indices: A list of tuples (color, start_index, length) indicating the byte ranges to highlight.
         """
         addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
 
@@ -2566,11 +2535,11 @@ class TTE_DisassemblyViewer():
         viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
 
 
-    def LoadListFromESM(self, state_list: List[Tuple[str, EmuState]]):
+    def LoadListFromESM(self, state_list: StateList):
         self.execution_counts= {state.instruction_address: state.execution_count for _, state in state_list}
 
 
-    def LoadState(self, state: EmuState, insn_address: int, memory_pages: Dict[int, Tuple[int, bytearray]]):
+    def LoadState(self, state: EmuState, insn_address: int, memory_pages: MemoryPagesDict):
         assert self.statusbar_state_id_qlabel, "Status bar not initialized"
         self.ClearHighlightLines()
         self.ClearCodeLinesComments()
@@ -2840,7 +2809,7 @@ class TTE_RegistersViewer:
 
         self.current_state_id: Optional[str] = None # Only SetRegisters() change this value.
 
-        self.regs_values: Optional[Dict[str, int]] = None # Only SetRegisters() change this value.
+        self.regs_values: Optional[RegistersDict] = None # Only SetRegisters() change this value.
         self.regs_patch: Optional[List[str]] = None # Only SetRegsPatch() change this value.
 
 
@@ -2869,13 +2838,13 @@ class TTE_RegistersViewer:
         self.statusbar_label.setText(f"State ID: {state_id}")
 
 
-    def SetRegisters(self, state_id: str, regs_values: Dict[str, int]):
+    def SetRegisters(self, state_id: str, regs_values: RegistersDict):
         self.current_state_id = state_id
         self.regs_values = regs_values
         self._RefreshStatusBar(state_id)
 
 
-    def SetRegsPatch(self, state_id: str, regs_patch: Optional[Dict[str, int]]):
+    def SetRegsPatch(self, state_id: str, regs_patch: Optional[RegistersDict]):
         assert state_id == self.current_state_id
         if regs_patch is not None:
             self.regs_patch = list(regs_patch.keys())
@@ -3182,7 +3151,7 @@ class TTE_MemoryViewer:
 
         idaapi.msg(output_msg)
 
-    def LoadState(self, state_id: str, memory_pages: Dict[int, Tuple[int, bytearray]]):
+    def LoadState(self, state_id: str, memory_pages: MemoryPagesDict):
         """
         Loads the memory state for display.
         """
@@ -3384,13 +3353,13 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.subchooser_list: List[ida_kernwin.Choose] = []
 
         self.state_manager: Optional[EmuStateManager] = None
-        self.state_list: Optional[List[Tuple[str, EmuState]]] = None # List of (state_id, state) formed in order of generation
+        self.state_list: Optional[StateList] = None # List of (state_id, state) formed in order of generation
 
         self.current_state_idx: int = 0 # Index of current state in state_list.
         self.current_state_id: Optional[str] = None # Only SwitchStateDisplay() can change this value.
         self.current_full_state: Optional[FullEmuState] = None # Only SwitchStateDisplay() can change this value.
 
-        self.current_diffs: Optional[Tuple[Tuple[Optional[str], str],  Optional[Dict[str, Tuple[int, int]]], Optional[SortedDict], Optional[SortedDict]]] = None
+        self.current_diffs: Optional[Tuple[Tuple[Optional[str], str],  Optional[RegistersDiffsDict], Optional[SortedDict], Optional[SortedDict]]] = None
 
         # configs
         self.follow_current_instruction = False # True # Whether to follow the current instruction when switching states.
@@ -3536,8 +3505,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         if self.current_state_idx < len(self.state_list) - 1:
             self.current_state_idx += 1
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
-        # else:
-        #     idaapi.msg("Already at the last state.\n")
 
 
     def SwitchPrevStateAction(self):
@@ -3545,8 +3512,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         if self.current_state_idx > 0:
             self.current_state_idx -= 1
             self.SwitchStateDisplay(self.state_list[self.current_state_idx][0])
-        # else:
-        #     idaapi.msg("Already at the first state.\n")
 
 
     def SwitchCursorStateAction(self):
@@ -3559,12 +3524,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             target_state_id = next((state_id for state_id, state in self.state_list if address_str in state_id), None)
             if target_state_id:
                 self.SwitchState(target_state_id)
-        #     else:
-        #         idaapi.msg(f"No state found for address {address_str}\n")
-        # else:
-        #     idaapi.msg("No cursor address.\n")
-
-
 
 
     def SwitchInputStateAction(self):
@@ -3579,7 +3538,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
     def ChooseStatesAction(self):
 
         class StateChooser(ida_kernwin.Choose):
-            def __init__(self, title, state_list: List[Tuple[str, EmuState]], switch_state_func):
+            def __init__(self, title, state_list: StateList, switch_state_func):
                 ida_kernwin.Choose.__init__(
                     self,
                     title,
@@ -3622,7 +3581,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             def OnRefresh(self, n):
                 self.OnInit()
                 return [ida_kernwin.Choose.ALL_CHANGED] + self.adjust_last_item(n)
-
 
 
         if self.state_list is None:
@@ -3732,7 +3690,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                 self.items = [] # Initialize items list
 
             def OnInit(self):
-                (prev_state_id, curr_state_id), regs_diff, mem_diff, page_diff = self.get_current_diff_func() # Optional[Tuple[Optional[Dict[str, int]], Optional[SortedDict], Optional[SortedDict]]]
+                (prev_state_id, curr_state_id), regs_diff, mem_diff, page_diff = self.get_current_diff_func() # Optional[Tuple[Optional[RegistersPatchDict], Optional[SortedDict], Optional[SortedDict]]]
                 tte_log_info(f"Showing differents from {prev_state_id} to {curr_state_id}")
                 self.items = []
                 if regs_diff:
@@ -3832,11 +3790,11 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             return
 
         # Catch up all different information between current and target state
-        regs_diff: Optional[Dict[str, Tuple[int, int]]] = None
+        regs_diff: Optional[RegistersDiffsDict] = None
         mem_diff: Optional[SortedDict] = None # SortedDict[address, (prev_value, new_value)] (single byte)
         page_diff: Optional[SortedDict] = None # SortedDict[page_start_addr, (change_mode, (perm, data))]
 
-        regs_patch: Optional[Dict[str, int]] = None
+        regs_patch: Optional[RegistersPatchDict] = None
         mem_patch: Optional[List[Tuple[int, bytes]]] = None # List of (address, value_bytes) for changed memory regions
 
         if self.current_full_state is not None:
@@ -3886,31 +3844,6 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.current_state_id = target_state_id
 
         self.RefreshSubviewers() # Refresh Choose dialogs if open
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
