@@ -11,7 +11,7 @@ import ida_segment
 import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Callable,Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
+from typing import Callable, Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
 from copy import deepcopy
 from dataclasses import dataclass
 from re import split
@@ -31,6 +31,17 @@ VERSION = '0.0.1'
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
 
+NEXT_STATE_ACTION_SHORTCUT = "F3"
+PREV_STATE_ACTION_SHORTCUT = "F2"
+CURSOR_STATE_ACTION_SHORTCUT = "Q"
+
+
+EXECUTE_INSN_HILIGHT_COLOR = 0xFFD073
+CHANGE_HIGHLIGHT_COLOR   = 0xFFD073
+BYTE_CHANGE_HIGHTLIGHT = ida_kernwin.CK_EXTRA11
+
+
+
 # Define page size and page mask, usually 4 kb
 PAGE_SIZE = 0x1000
 PAGE_MASK = ~(PAGE_SIZE - 1)
@@ -40,17 +51,6 @@ DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
 
 
 
-
-PAGE_SIZE = 0x1000
-
-NEXT_STATE_ACTION_SHORTCUT = "F3"
-PREV_STATE_ACTION_SHORTCUT = "F2"
-CURSOR_STATE_ACTION_SHORTCUT = "Q"
-
-EXECUTE_INSN_HILIGHT_COLOR = 0xFFD073
-CHANGE_HIGHLIGHT_COLOR   = 0xFFD073
-
-BYTE_CHANGE_HIGHTLIGHT = ida_kernwin.CK_EXTRA11
 
 
 
@@ -549,10 +549,10 @@ BUTTON YES* Emulate
 EmuTrace: Emulator Settings
 
             {FormChangeCb}
-            Emulation Execution Range:
-            <Start Address  :{i_start_address}>
-            <End Address    :{i_end_address}>
-            <Select Function range    :{b_select_function}>
+            Emulation Execute Range:
+            <Start address  :{i_start_address}>
+            <End address    :{i_end_address}>
+            <Select function range    :{b_select_function}>
 
             Configs:
             <Emlate step limit  :{i_emulate_step_limit}>
@@ -562,8 +562,8 @@ EmuTrace: Emulator Settings
             <Jump over syscalls:{r_jump_over_syscalls}>
             <log:{r_log}>{c_configs_group}>
 
-            <Log Level:{i_log_level}>
-            <Log File Path:{i_log_file_path}>
+            <Log level:{i_log_level}>
+            <Log file path:{i_log_file_path}>
 
 
             Advanced Configs:
@@ -597,11 +597,18 @@ EmuTrace: Emulator Settings
     def _on_form_change(self, fid: int):
         assert self.r_load_register is not None, "r_load_register is not initialized"
 
+        # Init
         if fid == -1:
             if not idaapi.is_debugger_on():
                 self.EnableField(self.r_load_register, False)
             else:
                 self.EnableField(self.r_load_register, True)
+
+        # Click Yes
+        elif fid == -2:
+            ok = self._set_emu_range()
+            if not ok:
+                return 0
         return 1
 
     def set_default_values(self):
@@ -707,18 +714,19 @@ Preprocessing Code Input
             try:
                 if self.i_start_address is None or self.i_end_address is None:
                     ida_kernwin.warning("Address input controls are not initialized.")
-                    return
-                start_t =  self.i_start_address.value
-                end_t =  self.i_end_address.value
+                    return 0
+                start_t: Optional[int] =  self.GetControlValue(self.i_start_address) # type: ignore
+                end_t: Optional[int] =  self.GetControlValue(self.i_end_address) # type: ignore
+                if not start_t or not end_t:
+                    raise ValueError()
             except ValueError:
                 ida_kernwin.warning("Invalid Input: Please enter valid hexadecimal addresses.")
-                return
+                return 0
 
-        # check range
-        if start_t > end_t:
-            ida_kernwin.warning("Invalid Range: Start address must be less than or equal to end address.")
-        elif start_t < ida_ida.inf_get_min_ea() or end_t > ida_ida.inf_get_max_ea():
-            ida_kernwin.warning("Invalid Range: Address out of range.")
+        if start_t < ida_ida.inf_get_min_ea() or end_t > ida_ida.inf_get_max_ea():
+            y = ida_kernwin.ask_yn(2, "Invalid Range: Address out of range, continute?")
+            if y == 0:
+                return 0
 
         # set range
         self.sim_range_start = start_t
@@ -727,10 +735,9 @@ Preprocessing Code Input
         if start != -1 and end != -1:
             self.SetControlValue(self.i_start_address, start_t)
             self.SetControlValue(self.i_end_address, end_t)
-
+        return 1
 
     def GetSetting(self):
-        self._set_emu_range()
         if self.i_emulate_step_limit is None or \
            self.c_configs_group is None or \
            self.i_time_out is None or \
@@ -2338,6 +2345,16 @@ class ColorfulLineGenerator():
 
         return f"{addr_str}  {hex_str} | {ascii_str}", hightlight_byte_indices
 
+    @staticmethod
+    def GenerateEmplyMemoryLine(address, address_len, bytes_per_line=16) -> str:
+        """
+        Generates a colored empty memory dump line.
+        """
+        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_DREFTAIL)
+        hex_str = " ".join("??" for _ in range(bytes_per_line))
+        ascii_str = "".join("." for _ in range(bytes_per_line))
+
+        return f"{addr_str}  {hex_str} | {ascii_str}"
 
 
 class TTE_DisassemblyViewer():
@@ -2616,6 +2633,30 @@ class TTE_DisassemblyViewer():
                                         line.bgcolor)
 
 
+    def HighlightCurrentInsn(self):
+        assert self.current_state is not None, "State not loaded"
+
+        if self.current_insn_address > 0 and self.current_insn_address >= self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
+            # Highlight current instruction in memory range.
+            self.AddHightlightLine(self.current_insn_address, self.codelines_dict.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
+
+            # If the current instruction is not recognized as a code by IDA, disassemlby it use capstone.
+            if not idc.is_code(ida_bytes.get_flags(self.current_insn_address)):
+                count = 0
+                if self.execution_counts and self.current_insn_address in self.execution_counts:
+                    count = self.execution_counts[self.current_insn_address]
+                if len(self.current_state.instruction) != 0:
+                    self.viewer.UpdateLineRange(self.current_insn_address, len(self.current_state.instruction), SINGLE_DATA_LINE,
+                                        ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
+                                                                                            self.addr_len,
+                                                                                            self.current_state.instruction,
+                                                                                            len(self.current_state.instruction),
+                                                                                            count,
+                                                                                            True),
+                                                                                            None, None)
+
+
+
     def ApplyStatePatchesInViewer(self, mem_patch: Optional[List[Tuple[int, bytes]]], page_diff: Optional[SortedDict]):
         """
         Apply memory patches to the viewer and highlight the changed lines.
@@ -2657,24 +2698,7 @@ class TTE_DisassemblyViewer():
                         self.viewer.UpdateLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
                 self.hightlighting_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
 
-        if self.current_insn_address > 0 and self.current_insn_address > self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
-            # Highlight current instruction in memory range.
-            self.AddHightlightLine(self.current_insn_address, self.codelines_dict.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
-
-            # If the current instruction is not recognized as a code by IDA, disassemlby it use capstone.
-            if not idc.is_code(ida_bytes.get_flags(self.current_insn_address)):
-                count = 0
-                if self.execution_counts and self.current_insn_address in self.execution_counts:
-                    count = self.execution_counts[self.current_insn_address]
-                if len(self.current_state.instruction) != 0:
-                    self.viewer.UpdateLineRange(self.current_insn_address, len(self.current_state.instruction), SINGLE_DATA_LINE,
-                                        ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
-                                                                                            self.addr_len,
-                                                                                            self.current_state.instruction,
-                                                                                            len(self.current_state.instruction),
-                                                                                            count,
-                                                                                            True),
-                                                                                            None, None)
+        self.HighlightCurrentInsn()
         self.HighlightLines()
         self.ShowCodeLinesComments()
         self.viewer.Refresh()
@@ -2770,33 +2794,13 @@ class TTE_DisassemblyViewer():
         self.current_range_display_start = range_start
         self.current_range_display_end = range_end
 
-        if self.current_insn_address > 0 and self.current_insn_address > self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
-            # Highlight current instruction in memory range.
-            self.AddHightlightLine(self.current_insn_address, self.codelines_dict.get(self.current_insn_address, 0), EXECUTE_INSN_HILIGHT_COLOR)
-
-            # If the current instruction is not recognized as a code by IDA, disassemlby it use capstone.
-            if not idc.is_code(ida_bytes.get_flags(self.current_insn_address)):
-                count = 0
-                if self.execution_counts and self.current_insn_address in self.execution_counts:
-                    count = self.execution_counts[self.current_insn_address]
-                if len(self.current_state.instruction) != 0:
-                    self.viewer.UpdateLineRange(self.current_insn_address, len(self.current_state.instruction), SINGLE_DATA_LINE,
-                                        ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
-                                                                                            self.addr_len,
-                                                                                            self.current_state.instruction,
-                                                                                            len(self.current_state.instruction),
-                                                                                            count,
-                                                                                            True),
-                                                                                            None, None)
-
-
-
-        # Set status bar memory range label.
-        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
+        self.HighlightCurrentInsn()
         self.HighlightLines()
         self.ShowCodeLinesComments()
         self.viewer.Refresh()
 
+        # Set status bar memory range label.
+        self.statusbar_memory_range_qlabel.setText(f"(Mem: 0x{range_start:0{self.addr_len}X} ~ 0x{range_end:0{self.addr_len}X})")
 
 
 class TTE_RegistersViewer:
@@ -3326,16 +3330,18 @@ class TTE_MemoryViewer:
                     break # Assuming one page fully covers or starts the line
 
             if not page_found_for_line:
-                # If no page covers this address range, it's unknown/unmapped memory
-                # line_data remains all zeros (initialized as such)
-                pass # Already initialized as zeros.
-
-            line_text = ColorfulLineGenerator.GenerateMemoryLine(
-                current_addr,
-                self.addr_len,
-                line_data,
-                self.BYTES_PER_LINE
-            )
+                line_text = ColorfulLineGenerator.GenerateEmplyMemoryLine(
+                    current_addr,
+                    self.addr_len,
+                    self.BYTES_PER_LINE
+                )
+            else:
+                line_text, _ = ColorfulLineGenerator.GenerateMemoryLine(
+                    current_addr,
+                    self.addr_len,
+                    line_data,
+                    self.BYTES_PER_LINE
+                )
             self.viewer.AddLine(current_addr, DATA_LINE, line_text) # Use DATA_LINE for generic memory view
 
             current_addr += self.BYTES_PER_LINE
