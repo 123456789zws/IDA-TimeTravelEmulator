@@ -86,7 +86,8 @@ In the settings dialog, configure the emulation parameters:
 
 
 ### Time Travel Emulator View
-<img width="2549" height="1313" alt="image" src="https://github.com/user-attachments/assets/40ad40a1-da10-40a4-9b92-e5168ec0ae44" />
+
+![Opening Time Travel Emulator View](https://github.com/user-attachments/assets/02d625d2-fac3-4271-a58d-1325fca32318)
 
 Click "Emulate" to start the simulation. When the simulation is completed, a new window will open displaying the disassembly, register, and memory views, starting from the first emulated state.
 
@@ -102,7 +103,9 @@ Use the following hotkeys for navigation:
   * `I`:  Prompt to enter a `state_id` (e.g., `$401000#5`) to jump to a specific state.
 
 #### Register View and Memory View
-<img width="2330" height="988" alt="image" src="https://github.com/user-attachments/assets/e5f45483-10f3-4a28-b7c0-85df3e8ba96d" />
+
+![Register View and Memory View examples](https://github.com/user-attachments/assets/fbcfc301-c639-4f85-a4cf-891909189011)
+
 
 When switching between states, these views will highlight the changed register values and memory bytes respectively, making it easy to identify differences.
 
@@ -131,14 +134,14 @@ Use hotkey `M` to open this view and quickly ascertain the memory pages loaded i
 
 ##### Difference Chooser
 
-<img width="2560" height="1333" alt="image" src="https://github.com/user-attachments/assets/c27900b7-ceb0-4804-81be-a99d09833450" />
+![Difference chooser use examples](https://github.com/user-attachments/assets/ad40cd4b-c82a-49ca-a07d-ff22705394dd)
 
 Use hotkey `D` to open the difference selector view. This view automatically updates when switching states, providing a clear visual representation of memory and register changes between the two states.
 
 
 #### Debugging Mode
 
-<img width="2560" height="1289" alt="image" src="https://github.com/user-attachments/assets/b07d7b10-fecb-42d2-aeae-2d7f4cb0e655" />
+![Deubugging registers load](https://github.com/user-attachments/assets/b55cc289-dfd4-4574-b066-1440192b221f)
 
 The plugin supports emulation in IDA's debugging mode and can automatically load the current register values.
 
