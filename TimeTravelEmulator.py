@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '0.0.1'
+VERSION = '1.0.0'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
