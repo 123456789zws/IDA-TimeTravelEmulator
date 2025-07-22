@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -479,7 +479,7 @@ class EmuSettings():
 
     is_load_registers: bool = False
     is_jump_over_syscalls: bool = False
-    is_set_default_stack_value: bool = False
+    is_set_stack_value: bool = False
 
     time_out: int = 0
     count: int = 500
@@ -492,6 +492,7 @@ class EmuSettings():
 class EmuSettingsForm(idaapi.Form):
 
     def __init__(self, start_ea, end_ea) -> None:
+        self.emu_settings = EmuSettings()
 
         self.i_start_address: Optional[ida_kernwin.Form.NumericInput] =  None
         self.i_end_address: Optional[ida_kernwin.Form.NumericInput] = None
@@ -502,7 +503,7 @@ class EmuSettingsForm(idaapi.Form):
         self.c_configs_group: Optional[ida_kernwin.Form.ChkGroupControl] = None
         self.r_load_register: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
         self.r_jump_over_syscalls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
-        self.r_set_default_stack_value: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+        self.r_set_stack_value: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
 
         self.i_log_level: Optional[ida_kernwin.Form.DropdownListControl] = None
         self.i_log_file_path: Optional[ida_kernwin.Form.FileInput] = None
@@ -511,7 +512,7 @@ class EmuSettingsForm(idaapi.Form):
         super().__init__(
             r'''STARTITEM {id:i_start_address}
 BUTTON YES* Emulate
-EmuTrace: Emulator Settings
+TimeTravel Emulator: Emulator Settings
 
             {FormChangeCb}
             Emulation Execute Range:
@@ -520,12 +521,12 @@ EmuTrace: Emulator Settings
             <Select function range    :{b_select_function}>
 
             Configs:
-            <Emlate step limit  :{i_emulate_step_limit}>
-            <Emlate time out    :{i_time_out}>
+            <Emulate step limit  :{i_emulate_step_limit}>
+            <Emluate time out    :{i_time_out}>
 
             <load registers:{r_load_register}>
             <Jump over syscalls:{r_jump_over_syscalls}>
-            <Set default stack value:{r_set_default_stack_value}>{c_configs_group}>
+            <Set stack value:{r_set_stack_value}>{c_configs_group}>
 
             <Log level:{i_log_level}>
             <Log file path:{i_log_file_path}>
@@ -543,7 +544,7 @@ EmuTrace: Emulator Settings
 
                 'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=500, swidth = 30),
                 "i_time_out": self.NumericInput(self.FT_DEC, value=0, swidth = 30),
-                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_jump_over_syscalls", "r_set_default_stack_value")),
+                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_jump_over_syscalls", "r_set_stack_value")),
 
 
                 'i_log_level': self.DropdownListControl(
@@ -577,21 +578,24 @@ EmuTrace: Emulator Settings
             ok = self._set_emu_range()
             if not ok:
                 return 0
+            self._set_setting_result()
+            return 1
+
         return 1
 
     def set_default_values(self):
         assert self.r_load_register is not None \
-            and self.r_set_default_stack_value is not None, "r_load_register is not initialized"
+            and self.r_set_stack_value is not None, "r_load_register is not initialized"
 
 
         self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
 
         if idaapi.is_debugger_on():
             self.r_load_register.checked = True
-            self.r_set_default_stack_value.checked = False
+            self.r_set_stack_value.checked = False
         else:
             self.r_load_register.checked = False
-            self.r_set_default_stack_value.checked = True
+            self.r_set_stack_value.checked = True
 
 
 
@@ -623,7 +627,9 @@ Preprocessing Code Input
                     'i_multiline_text': self.MultiLineTextControl(text=default_multiline_text,
                                                                   flags = ida_kernwin.Form.MultiLineTextControl.TXTF_FIXEDFONT | \
                                                                   ida_kernwin.Form.MultiLineTextControl.TXTF_ACCEPTTABS,
-                                                                  tabsize = 4),
+                                                                  tabsize = 4,
+                                                                  width = 120,
+                                                                  swidth = 100),
                     'i_load_file': self.ButtonInput(self.OnLoadFile),
                     'i_save_file': self.ButtonInput(self.OnSaveFile),
                 })
@@ -711,30 +717,30 @@ Preprocessing Code Input
             self.SetControlValue(self.i_end_address, end_t)
         return 1
 
-    def GetSetting(self):
+
+    def _set_setting_result(self):
         if self.i_emulate_step_limit is None or \
            self.c_configs_group is None or \
            self.i_time_out is None or \
            self.r_load_register is None or \
            self.r_jump_over_syscalls is None or \
-           self.r_set_default_stack_value is None or \
+           self.r_set_stack_value is None or \
            self.i_log_level is None or \
            self.i_log_file_path is None:
             ida_kernwin.warning("Form controls are not initialized.")
             return None
 
-        settings = EmuSettings()
-        settings.start = self.sim_range_start
-        settings.end = self.sim_range_end
-        settings.count = self.i_emulate_step_limit.value
-        settings.time_out = self.i_time_out.value
+        self.emu_settings.start = self.sim_range_start
+        self.emu_settings.end = self.sim_range_end
+        self.emu_settings.count = self.i_emulate_step_limit.value
+        self.emu_settings.time_out = self.i_time_out.value
 
         # Get values directly from individual ChkInput controls
-        settings.is_load_registers = self.r_load_register.checked
-        settings.is_jump_over_syscalls = self.r_jump_over_syscalls.checked
-        settings.is_set_default_stack_value = self.r_set_default_stack_value.checked
+        self.emu_settings.is_load_registers = self.r_load_register.checked
+        self.emu_settings.is_jump_over_syscalls = self.r_jump_over_syscalls.checked
+        self.emu_settings.is_set_stack_value = self.r_set_stack_value.checked
 
-        settings.preprocessing_code = self.preprocessing_code
+        self.emu_settings.preprocessing_code = self.preprocessing_code
 
         log_level_map = {
             0: logging.DEBUG,
@@ -742,10 +748,13 @@ Preprocessing Code Input
             2: logging.WARNING,
             3: logging.ERROR,
         }
-        settings.log_level = log_level_map.get(self.i_log_level.value, logging.WARNING)
-        settings.log_file_path = self.i_log_file_path.value
 
-        return settings
+        log_level_value: int = self.GetControlValue(self.i_log_level) # type: ignore
+        self.emu_settings.log_level = log_level_map.get(log_level_value, logging.WARNING)
+        self.emu_settings.log_file_path = self.i_log_file_path.value
+
+    def GetSetting(self):
+        return self.emu_settings
 
 
 
@@ -820,6 +829,14 @@ class EmuExecutor():
         except Exception as e:
             idaapi.msg(f"Error executing preprocessing code: {e}")
             return idaapi.ask_yn(0, f"Error executing preprocessing code: {e}\nDo you want to continue?")
+
+        mem_regions_iter = emu_executor.get_mu().mem_regions()
+        for page_start, page_end, perm in mem_regions_iter:
+            current_addr = page_start
+            while current_addr < page_end:
+                emu_executor.loaded_pages.add(current_addr & PAGE_MASK)
+                current_addr += PAGE_SIZE
+
         return 1
 
     def get_mu(self):
@@ -914,7 +931,7 @@ class EmuExecutor():
 
 
     def _set_regs_init_value(self) -> None:
-        if not self.settings.is_load_registers and self.settings.is_set_default_stack_value and self.unicorn_arch == UC_ARCH_X86: # Set default stack value in x86 mode
+        if not self.settings.is_load_registers and self.settings.is_set_stack_value and self.unicorn_arch == UC_ARCH_X86: # Set default stack value in x86 mode
             offset = 0
             while(self._is_memory_mapped(DEFAULT_STACK_POINT_VALUE + offset)):
                 offset += 0x1000000
@@ -2702,9 +2719,9 @@ class TTE_DisassemblyViewer():
         self.codelines_dict.clear()
         current_addr = range_start
         for start_addr, (perm, data) in self.memory_pages_list:
-            assert len(data) == PAGE_SIZE
+            data_length =  len(data)
 
-            if start_addr > range_end or start_addr + PAGE_SIZE <= range_start:
+            if start_addr > range_end or start_addr + data_length <= range_start:
                 continue
 
             # Process empty addresses that may exist before the current page
@@ -2714,7 +2731,7 @@ class TTE_DisassemblyViewer():
                 self.viewer.AddLine(current_addr, UNKNOW_LINE, line_text)
                 current_addr += 1
 
-            while current_addr < start_addr + PAGE_SIZE and current_addr < range_end:
+            while current_addr < start_addr + data_length and current_addr < range_end:
                 count = 0
                 address_idx = 0
                 if current_addr in self.execution_counts:
@@ -3889,12 +3906,32 @@ def StartTimeTravelEmulator(settings: EmuSettings) -> None:
 
 
 
+
+TTE_RUN_ACTION_NAME =  "TimeTravelEmulator:Run"
+
+class action_handler(ida_kernwin.action_handler_t):
+    def __init__(self, handler):
+        super().__init__()
+        self.handler = handler
+
+    def activate(self, ctx):
+        self.handler()
+
+    def update(self, ctx):
+        return ida_kernwin.AST_ENABLE_FOR_WIDGET if ctx.widget_type == ida_kernwin.BWN_DISASM else ida_kernwin.AST_DISABLE_FOR_WIDGET
+
+class Hooks(ida_kernwin.UI_Hooks):
+    def finish_populating_widget_popup(self, widget, popup):
+        if ida_kernwin.get_widget_type(widget) == ida_kernwin.BWN_DISASM:
+            ida_kernwin.attach_action_to_popup(widget, popup, TTE_RUN_ACTION_NAME, None)
+tte_run_menu_hook = None
+
+
 class TimeTravelEmulator(idaapi.plugin_t):
     flags = idaapi.PLUGIN_DRAW
     comment = "Time Travel Emulator"
     wanted_name = "Time Travel Emulator"
-    wanted_hotkey = PLUGIN_HOTKEY
-
+    wanted_hotkey = ""
 
     def __init__(self):
         super().__init__()
@@ -3909,6 +3946,18 @@ class TimeTravelEmulator(idaapi.plugin_t):
         if arch is not None:
             # Supported architecture found.
             idaapi.msg(f"[TimeTravelEmulator] CPU architecture: {arch}\n")
+
+            # Register actions
+            ida_kernwin.register_action(ida_kernwin.action_desc_t(
+                    TTE_RUN_ACTION_NAME,
+                    "Run Time Travel Emulator",
+                    action_handler(lambda: self.run(None)),
+                    PLUGIN_HOTKEY))
+            global tte_run_menu_hook
+            tte_run_menu_hook = Hooks()
+            tte_run_menu_hook.hook()
+
+
             idaapi.msg("[TimeTravelEmulator] Ready.\n")
             return idaapi.PLUGIN_KEEP
         else:

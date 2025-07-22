@@ -24,12 +24,12 @@ The `TimeTravelEmulator` is a powerful IDA Pro plugin that brings the concept of
 
 1.  Use `pip install bsdiff4 capstone sortedcontainers unicorn` to install nessesary dependencies for this plugin in your IDAPython.
 2.  Place the `TimeTravelEmulator.py` file into your IDA Pro `plugins` directory.
-3.  Use hotkey `Shift+T` to open the `EmuTrace: Emulator Settings` dialog.
+3.  Use hotkey `Shift+T` to open the `TimeTravel Emulator: Emulator Settings` dialog.
 
 
 ## Usage
 
-Press the hotkey `Shift+T` to open the `EmuTrace: Emulator Settings` dialog.
+Press the hotkey `Shift+T` to open the `TimeTravel Emulator: Emulator Settings` dialog.
 
 In the settings dialog, you can:
     * Define the **Emulation Execute Range** by specifying a start and end address, or by selecting a function.
