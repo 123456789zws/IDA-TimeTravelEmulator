@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -479,6 +479,8 @@ class EmuSettings():
 
     is_load_registers: bool = False
     is_jump_over_syscalls: bool = False
+    is_set_default_stack_value: bool = False
+
     time_out: int = 0
     count: int = 500
     log_level: int = logging.WARNING
@@ -500,6 +502,7 @@ class EmuSettingsForm(idaapi.Form):
         self.c_configs_group: Optional[ida_kernwin.Form.ChkGroupControl] = None
         self.r_load_register: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
         self.r_jump_over_syscalls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+        self.r_set_default_stack_value: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
 
         self.i_log_level: Optional[ida_kernwin.Form.DropdownListControl] = None
         self.i_log_file_path: Optional[ida_kernwin.Form.FileInput] = None
@@ -522,7 +525,7 @@ EmuTrace: Emulator Settings
 
             <load registers:{r_load_register}>
             <Jump over syscalls:{r_jump_over_syscalls}>
-            <log:{r_log}>{c_configs_group}>
+            <Set default stack value:{r_set_default_stack_value}>{c_configs_group}>
 
             <Log level:{i_log_level}>
             <Log file path:{i_log_file_path}>
@@ -540,7 +543,7 @@ EmuTrace: Emulator Settings
 
                 'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=500, swidth = 30),
                 "i_time_out": self.NumericInput(self.FT_DEC, value=0, swidth = 30),
-                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_jump_over_syscalls", "r_log")),
+                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_jump_over_syscalls", "r_set_default_stack_value")),
 
 
                 'i_log_level': self.DropdownListControl(
@@ -577,12 +580,18 @@ EmuTrace: Emulator Settings
         return 1
 
     def set_default_values(self):
-        assert self.r_load_register is not None, "r_load_register is not initialized"
+        assert self.r_load_register is not None \
+            and self.r_set_default_stack_value is not None, "r_load_register is not initialized"
+
 
         self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
 
         if idaapi.is_debugger_on():
             self.r_load_register.checked = True
+            self.r_set_default_stack_value.checked = False
+        else:
+            self.r_load_register.checked = False
+            self.r_set_default_stack_value.checked = True
 
 
 
@@ -706,6 +715,9 @@ Preprocessing Code Input
         if self.i_emulate_step_limit is None or \
            self.c_configs_group is None or \
            self.i_time_out is None or \
+           self.r_load_register is None or \
+           self.r_jump_over_syscalls is None or \
+           self.r_set_default_stack_value is None or \
            self.i_log_level is None or \
            self.i_log_file_path is None:
             ida_kernwin.warning("Form controls are not initialized.")
@@ -718,9 +730,9 @@ Preprocessing Code Input
         settings.time_out = self.i_time_out.value
 
         # Get values directly from individual ChkInput controls
-        settings.is_load_registers = self.r_load_register.checked # type: ignore
-        settings.is_jump_over_syscalls = self.r_jump_over_syscalls.checked # type: ignore
-        is_log_enabled = self.r_log.checked # type: ignore
+        settings.is_load_registers = self.r_load_register.checked
+        settings.is_jump_over_syscalls = self.r_jump_over_syscalls.checked
+        settings.is_set_default_stack_value = self.r_set_default_stack_value.checked
 
         settings.preprocessing_code = self.preprocessing_code
 
@@ -902,7 +914,7 @@ class EmuExecutor():
 
 
     def _set_regs_init_value(self) -> None:
-        if not self.settings.is_load_registers and self.unicorn_arch == UC_ARCH_X86: # Set default stack value in x86 mode
+        if not self.settings.is_load_registers and self.settings.is_set_default_stack_value and self.unicorn_arch == UC_ARCH_X86: # Set default stack value in x86 mode
             offset = 0
             while(self._is_memory_mapped(DEFAULT_STACK_POINT_VALUE + offset)):
                 offset += 0x1000000
@@ -3906,6 +3918,10 @@ class TimeTravelEmulator(idaapi.plugin_t):
             return idaapi.PLUGIN_SKIP
 
     def run(self, arg):
+        if ida_kernwin.find_widget(TimeTravelEmuViewer.title):
+            idaapi.msg("[TimeTravelEmulator] Already running.\n")
+            return
+
         start, end = self.get_ea_range()
         F = EmuSettingsForm(start, end)
         IsEmulate = F.Execute()
