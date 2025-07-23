@@ -156,6 +156,13 @@ Use hotkey `D` to open the difference chooser view. This view automatically upda
 
 The plugin supports emulation in IDA's debugging mode and can automatically load the current register values.
 
+#### Dynamic Disassembly
+
+<img width="2454" height="976" alt="image" src="https://github.com/user-attachments/assets/97a2dc00-077c-4a1b-bffa-9a9221b9ee9a" />
+
+
+When the simulation execution flow enters a segment of data that the IDA does not recognize as executable code, the plugin disassembles the data using the Capstone engine.
+
 
 ## Supported Architectures
 
