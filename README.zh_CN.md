@@ -168,6 +168,14 @@ int main() {
 
 该插件支持在 IDA 的调试模式下进行仿真，并可以自动加载当前寄存器值。
 
+
+#### 动态反汇编
+
+<img width="2454" height="976" alt="image" src="https://github.com/user-attachments/assets/97a2dc00-077c-4a1b-bffa-9a9221b9ee9a" />
+
+当模拟执行流进入 IDA 未识别为可执行代码的数据段时，插件将使用 Capstone 引擎对这些数据进行反汇编。
+
+
 ## 支持的架构
 
 该插件目前支持 x86 (32-bit) 和 x64 (64-bit) 架构。
