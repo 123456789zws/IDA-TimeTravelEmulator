@@ -111,7 +111,7 @@ Use the following hotkeys for navigation:
   * `F3`: Move to the next recorded state.
   * `F2`: Move to the previous recorded state.
   * `Q`:  Jump to the state corresponding to the instruction at the cursor.
-  * `I`:  Prompt to enter a `state_id` (e.g., `$401000#5`) to jump to a specific state.
+  * `I`:  Prompt to enter a `state_id` (e.g., `$0x401000#5`) to jump to a specific state.
 
 #### Register View and Memory View
 

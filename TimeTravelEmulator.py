@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.3'
+VERSION = '1.0.4'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -2549,9 +2549,17 @@ class TTE_DisassemblyViewer():
         form = RangeInputForm(self.current_range_display_start,self.current_range_display_end)
         IsSet = form.Execute()
         if IsSet is not None:
-            range_start = form.start_addr
-            range_end = form.end_addr
-            self.DisplayMemoryRange(range_start, range_end)
+            range_start: int = form.start_addr # type: ignore
+            range_end: int = form.end_addr # type: ignore
+
+            if range_start > range_end:
+                idaapi.warning("Invalid range, start address should be less than end address")
+            elif range_end - range_start > 16 * PAGE_SIZE:
+                ok = idaapi.ask_yn(0, f"The range is too large, do you want to continue? (Range: {range_start:X} - {range_end:X})")
+                if ok == 1:
+                    self.DisplayMemoryRange(range_start, range_end)
+            else:
+                self.DisplayMemoryRange(range_start, range_end)
         form.Free()
 
 
@@ -3117,9 +3125,17 @@ class TTE_MemoryViewer:
         form = RangeInputForm(self.current_range_display_start, self.current_range_display_end)
         IsSet = form.Execute()
         if IsSet is not None:
-            range_start = form.start_addr
-            range_end = form.end_addr
-            self.DisplayMemoryRange(range_start, range_end)
+            range_start: int = form.start_addr # type: ignore
+            range_end: int = form.end_addr # type: ignore
+
+            if range_start > range_end:
+                idaapi.warning("Invalid range, start address should be less than end address")
+            elif range_end - range_start > 16 * PAGE_SIZE:
+                ok = idaapi.ask_yn(0, f"The range is too large, do you want to continue? (Range: {range_start:X} - {range_end:X})")
+                if ok == 1:
+                    self.DisplayMemoryRange(range_start, range_end)
+            else:
+                self.DisplayMemoryRange(range_start, range_end)
         form.Free()
 
 
