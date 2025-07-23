@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.2'
+VERSION = '1.0.3'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -41,6 +41,18 @@ CHANGE_HIGHLIGHT_COLOR   = 0xFFD073
 BYTE_CHANGE_HIGHTLIGHT = ida_kernwin.CK_EXTRA11
 
 
+
+# Define page size and page mask, usually 4 kb
+PAGE_SIZE = 0x1000
+PAGE_MASK = ~(PAGE_SIZE - 1)
+
+# Define default page permission
+DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
+
+
+# Define default stack and base point values
+DEFAULT_STACK_POINT_VALUE = 0x70000000
+DEFAULT_BASE_POINT_VALUE = DEFAULT_STACK_POINT_VALUE
 
 
 
@@ -277,19 +289,22 @@ def get_page_slice(page_start: int, page_size: int) -> List[Tuple[int, int]]:
     """
     result: List[Tuple[int, int]] = []
     seg = ida_segment.get_first_seg()
+    page_end = page_start + page_size
     while seg:
+        if seg.start_ea >= page_end:
+            break
         # Check for overlap:
         # (seg.start_ea <= end_address) and (seg.end_ea >= start_address)
-        if seg.start_ea < page_start + page_size - 1 and seg.end_ea > page_start:
+        if seg.start_ea < page_end - 1 and seg.end_ea > page_start:
             max_addr = max(seg.start_ea, page_start)
-            min_addr = min(seg.end_ea, page_start + page_size - 1)
+            min_addr = min(seg.end_ea, page_end - 1)
             result.append((max_addr, min_addr))
         seg = ida_segment.get_next_seg(seg.end_ea -1 ) # -1 to ensure next segment is properly found
 
     return result
 
 
-def get_segment_prem(addr: int) -> int:
+def get_segment_prem(addr: int) -> int: # [ ] TODO: The segments of the program are not always page-aligned, so this situation needs to be considered
     seg = ida_segment.getseg(addr)
     if seg is not None:
         ida_perm = seg.perm
@@ -351,6 +366,7 @@ def catch_bytes_patch(
             patches[addr] = (permossion, b'')
 
     return patches, new_entries
+
 
 def apply_bytes_patch(
         base_bytes_dict: Dict[int, Tuple[int, bytearray]],
@@ -471,6 +487,7 @@ def tte_log_err(message):
     :param message: Information to be recorded
     """
     TTE_Logger().log(logging.ERROR,message)
+
 
 @dataclass
 class EmuSettings():
@@ -756,20 +773,6 @@ Preprocessing Code Input
     def GetSetting(self):
         return self.emu_settings
 
-
-
-
-# Define page size and page mask, usually 4 kb
-PAGE_SIZE = 0x1000
-PAGE_MASK = ~(PAGE_SIZE - 1)
-
-# Define default page permission
-DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
-
-
-# Define default stack and base point values
-DEFAULT_STACK_POINT_VALUE = 0x70000000
-DEFAULT_BASE_POINT_VALUE = DEFAULT_STACK_POINT_VALUE
 
 
 class EmuExecutor():
@@ -3943,7 +3946,7 @@ class TimeTravelEmulator(idaapi.plugin_t):
     def init(self):
         idaapi.msg("[TimeTravelEmulator] Init\n")
         arch = get_arch()
-        if arch is not None:
+        if arch != "":
             # Supported architecture found.
             idaapi.msg(f"[TimeTravelEmulator] CPU architecture: {arch}\n")
 
