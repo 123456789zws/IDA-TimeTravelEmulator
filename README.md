@@ -1,6 +1,10 @@
-# TimeTravelEmulator IDA Plugin
+# Time Travel Emulator
 
 The `TimeTravelEmulator` is a powerful IDA Pro plugin that brings the concept of time-travel debugging to your reverse engineering workflow. By integrating with the Unicorn emulation framework, it provides a unique capability to record and replay program execution, allowing for detailed analysis of runtime behavior.
+
+## Language
+
+English | [中文](README.zh_CN.md)
 
 
 ## Features
@@ -20,14 +24,21 @@ The `TimeTravelEmulator` is a powerful IDA Pro plugin that brings the concept of
     * Option to set custom preprocessing code to set up the Unicorn environment before emulation.
 
 
+## Requirements
+
+- IDA Pro version >= 7.7
+- Python version >= 3.8
+
+
 ## Installation
 
 1.  Use `pip install bsdiff4 capstone sortedcontainers unicorn` to install nessesary dependencies for this plugin in your IDAPython.
 2.  Place the `TimeTravelEmulator.py` file into your IDA Pro `plugins` directory.
-3.  Use hotkey `Shift+T` to open the `TimeTravel Emulator: Emulator Settings` dialog.
+3.  Restart IDA Pro.
 
 
-## Usage
+## Quick Start
+
 <img width="493" height="535" alt="image" src="https://github.com/user-attachments/assets/8eba2efd-e6ad-4527-b6e5-aa0e5ddcf094" />
 
 Press the hotkey `Shift+T` to open the `TimeTravel Emulator: Emulator Settings` dialog.
@@ -39,9 +50,9 @@ After the setting is completed, You can click "Emulate" to start the time-travel
 Once emulation is completed, the plugin will create a independent view, you can use the following hotkeys to navigate through the recorded states in this view:
 * `F3`: Move to the next recorded state.
 * `F2`: Move to the previous recorded state.
-* `Q`: Switch to a specific state by instruction address.
+* `Q`: Switch to a specific state by the instruction position where the cursor is located.
 
-## More details
+## More Details
 ```cpp
 #include <iostream>
 
@@ -89,12 +100,12 @@ In the settings dialog, configure the emulation parameters:
 
 ![Opening Time Travel Emulator View](https://github.com/user-attachments/assets/02d625d2-fac3-4271-a58d-1325fca32318)
 
-Click "Emulate" to start the simulation. When the simulation is completed, a new window will open displaying the disassembly, register, and memory views, starting from the first emulated state.
+Click "Emulate" to start the emulation. When the emulation is completed, a new window will open displaying the disassembly, register, and memory views, starting from the first emulated state.
 
 #### Disassembly View
 <img width="2325" height="1054" alt="image" src="https://github.com/user-attachments/assets/125d0e5f-747a-4ea1-a6e0-2e6943731aa0" />
 
-This is the core view, highlighting the currently executed assembly instruction line. The number on the far left indicates how many times the current instruction has been executed throughout the simulation.
+This is the core view, highlighting the currently executed assembly instruction line. The number on the far left indicates how many times the current instruction has been executed throughout the emulation.
 
 Use the following hotkeys for navigation:
   * `F3`: Move to the next recorded state.
@@ -121,13 +132,13 @@ The plugin also provides the following auxiliary views:
 
 <img width="2547" height="1253" alt="image" src="https://github.com/user-attachments/assets/e60b7573-3259-4f23-8216-f725ffc984b1" />
 
-Use the hotkey `C` to open the state selector view. This view displays all saved states during the emulation. Double-click an entry to jump to the corresponding state.
+Use the hotkey `C` to open the state chooser view. This view displays all saved states during the emulation. Double-click an entry to jump to the corresponding state.
 
 ##### Memory Page Chooser
 
 <img width="2242" height="1194" alt="image" src="https://github.com/user-attachments/assets/14a158b3-6249-4cf5-956e-67e69061085b" />
 
-The plugin employs a lazy-loading mechanism for memory pages during emulation, meaning pages are read from the IDA database only when accessed by an instruction, or map empty pages automatically. 
+The plugin employs a lazy-loading mechanism for memory pages during emulation, meaning pages are mapped and loaded only when accessed by an instruction.
 
 Use hotkey `M` to open this view and quickly ascertain the memory pages loaded in the current state.
 
@@ -136,7 +147,7 @@ Use hotkey `M` to open this view and quickly ascertain the memory pages loaded i
 
 ![Difference chooser use examples](https://github.com/user-attachments/assets/ad40cd4b-c82a-49ca-a07d-ff22705394dd)
 
-Use hotkey `D` to open the difference selector view. This view automatically updates when switching states, providing a clear visual representation of memory and register changes between the two states.
+Use hotkey `D` to open the difference chooser view. This view automatically updates when switching states, providing a clear visual representation of memory and register changes between the two states.
 
 
 #### Debugging Mode
