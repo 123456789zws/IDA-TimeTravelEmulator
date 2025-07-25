@@ -1714,7 +1714,7 @@ class InstrctionParser():
 
     def parse_instruction(self, insn_bytes: bytes) -> str:
         """
-        Parses an instruction and returns a tuple of (opcode, operand)
+        Parses an instruction and returns a string of the form "opcode operand"
         """
         assert self.md is not None, "InstrctionParser not initialized"
         try:
@@ -1723,6 +1723,16 @@ class InstrctionParser():
         except StopIteration:
             return ""
 
+    def parse_instruction_to_tuple(self, insn_bytes: bytes) -> Tuple[str, str]:
+        """
+        Parses an instruction and returns a tuple of (opcode, operand)
+        """
+        assert self.md is not None, "InstrctionParser not initialized"
+        try:
+            _, _, opcode, operand = next(self.md.disasm_lite(insn_bytes, 0))
+            return opcode,operand
+        except StopIteration:
+            return "", ""
 
 
 
@@ -2278,11 +2288,13 @@ class ColorfulLineGenerator():
         else:
             execution_counts_str = ida_lines.COLSTR(f"{execution_counts: 4}", ida_lines.SCOLOR_REGCMT)
 
-        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
         if not generate_by_capstone:
+            addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
             insn = ida_lines.generate_disasm_line(address)
         else:
-            insn = InstrctionParser().parse_instruction(value)
+            addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_IMPNAME)
+            opcode, operand = InstrctionParser().parse_instruction_to_tuple(value)
+            insn = ida_lines.COLSTR(opcode, ida_lines.SCOLOR_INSN) + "     " + ida_lines.COLSTR(operand, ida_lines.SCOLOR_DNAME)
         return f"{execution_counts_str} {addr_str}  {insn}"
 
     @staticmethod
