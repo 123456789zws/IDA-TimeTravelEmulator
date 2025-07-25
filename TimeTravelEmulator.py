@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.4'
+VERSION = '1.0.5'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -2550,7 +2550,7 @@ class TTE_DisassemblyViewer():
 
         form = RangeInputForm(self.current_range_display_start,self.current_range_display_end)
         IsSet = form.Execute()
-        if IsSet is not None:
+        if IsSet == 1:
             range_start: int = form.start_addr # type: ignore
             range_end: int = form.end_addr # type: ignore
 
@@ -3127,7 +3127,7 @@ class TTE_MemoryViewer:
         # Use current display range as default for the input form
         form = RangeInputForm(self.current_range_display_start, self.current_range_display_end)
         IsSet = form.Execute()
-        if IsSet is not None:
+        if IsSet == 1:
             range_start: int = form.start_addr # type: ignore
             range_end: int = form.end_addr # type: ignore
 
