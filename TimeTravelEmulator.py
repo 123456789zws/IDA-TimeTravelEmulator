@@ -2005,7 +2005,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
     def UpdateLine(self, address, address_idx, address_type, line, fgcolor=None, bgcolor=None):
         """
         Updates an existing line identified by its binary address.
-        or inserts a new line if it does not exist.
 
         :return: Boolean indicating success.
         """
@@ -2019,30 +2018,21 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 line_info.address_idx == address_idx:
                 return self.EditLine(address, address_idx, address_type, line, fgcolor, bgcolor)
             else:
-                self.DelLine(address, lazy=False)
-                return self.InsertLine(address, address_type, line, fgcolor, bgcolor)
+                return False
         return False
 
 
     def UpdateLineRange(self, address, length, address_type, line, fgcolor=None, bgcolor=None):
         """
-        Updates an existing line identified by its binary address.
-        or inserts a new line if it does not exist.
+        Deletes an existing line range identified by its binary address range.
+        and inserts a new line.
 
         :return: Boolean indicating success.
         """
         self.CheckRebuild()
-        target_line_info = address_line_info(address=address, address_idx=0)
-        lineno_to_edit = self._lines_data.bisect_left(target_line_info)
-        if lineno_to_edit < len(self._lines_data):
-            line_info: address_line_info = self._lines_data[lineno_to_edit] # type: ignore
-            if line_info.address == address and \
-                line_info.address_idx == 0:
-                # Del the entire range
-                for offset in range(length):
-                    self.DelLine(address + offset, lazy=False)
-                return self.InsertLine(address, address_type, line, fgcolor, bgcolor)
-        return False
+        for offset in range(length):
+            self.DelLine(address + offset, lazy=False)
+        return self.InsertLine(address, address_type, line, fgcolor, bgcolor)
 
 
     def PatchLine(self, address, address_idx, offs, value):
@@ -2644,6 +2634,7 @@ class TTE_DisassemblyViewer():
 
     def HighlightCurrentInsn(self):
         assert self.current_state is not None, "State not loaded"
+        assert self.memory_pages_list, "State data not loaded"
 
         if self.current_insn_address > 0 and self.current_insn_address >= self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
             # Highlight current instruction in memory range.
