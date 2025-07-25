@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.5'
+VERSION = '1.0.6'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -880,7 +880,7 @@ class EmuExecutor():
         :param load_seg_end: End address of the binary data to load.
         """
 
-        seg_data = ida_bytes.get_bytes(load_seg_start, load_seg_end - load_seg_start)
+        seg_data = ida_bytes.get_bytes(load_seg_start, load_seg_end - load_seg_start + 1)
         if seg_data:
             try:
                 self.mu.mem_write(load_seg_start, seg_data)
