@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.9'
+VERSION = '1.0.10'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -49,11 +49,9 @@ PAGE_MASK = ~(PAGE_SIZE - 1)
 # Define default page permission
 DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
 
-
-# Define default stack and base point values
+# Define default stack and frame values
 DEFAULT_STACK_POINT_VALUE = 0x70000000
 DEFAULT_BASE_POINT_VALUE = DEFAULT_STACK_POINT_VALUE
-
 
 
 UNICORN_ARCH_MAP =      {
@@ -88,6 +86,7 @@ UNICORN_REGISTERS_MAP = {
         "RDI": UC_X86_REG_RDI,
         "RBP": UC_X86_REG_RBP,
         "RSP": UC_X86_REG_RSP,
+        "RIP": UC_X86_REG_RIP,
         "R8": UC_X86_REG_R8,
         "R9": UC_X86_REG_R9,
         "R10": UC_X86_REG_R10,
@@ -97,7 +96,6 @@ UNICORN_REGISTERS_MAP = {
         "R14": UC_X86_REG_R14,
         "R15": UC_X86_REG_R15,
         # Instruction Pointer
-        "RIP": UC_X86_REG_RIP,
         # Flags Register
         "Rflags": UC_X86_REG_EFLAGS, # In 64-bit, EFLAGS is extended to RFLAGS, but the constant remains EFLAGS
         # Segment Registers
@@ -136,9 +134,6 @@ IP_REG_NAME_MAP = {
     "x64": "RIP",
     "x86": "EIP"
 }
-
-
-
 
 IDA_PERM_TO_UC_PERM_MAP = {
     ida_segment.SEGPERM_EXEC : UC_PROT_EXEC,
@@ -480,7 +475,6 @@ def tte_log_warn(message):
     """
     TTE_Logger().log(logging.WARNING,message)
 
-
 def tte_log_err(message):
     """
     Logging with ERROR level
@@ -577,6 +571,7 @@ TimeTravel Emulator: Emulator Settings
         self.Compile()
         self.set_default_values()
 
+
     def _on_form_change(self, fid: int):
         assert self.r_load_register is not None, "r_load_register is not initialized"
         assert self.r_jump_over_syscalls is not None, "r_jump_over_syscalls is not initialized"
@@ -600,6 +595,7 @@ TimeTravel Emulator: Emulator Settings
 
         return 1
 
+
     def set_default_values(self):
         assert self.r_load_register is not None \
             and self.r_set_stack_value is not None, "r_load_register is not initialized"
@@ -615,13 +611,13 @@ TimeTravel Emulator: Emulator Settings
             self.r_set_stack_value.checked = True
 
 
-
     def _open_select_function_dialog(self, code = 0):
         target_func =  ida_kernwin.choose_func("Select target function range",1)
         if not target_func:
             return
 
         self._set_emu_range(target_func.start_ea, target_func.end_ea)
+
 
     def _add_preprocessing_code(self, code = 0):
 
@@ -770,6 +766,7 @@ Preprocessing Code Input
         self.emu_settings.log_level = log_level_map.get(log_level_value, logging.WARNING)
         self.emu_settings.log_file_path = self.i_log_file_path.value
 
+
     def GetSetting(self):
         return self.emu_settings
 
@@ -777,10 +774,8 @@ Preprocessing Code Input
 
 class EmuExecutor():
     """
-    A simulation executor class is used to manage the operation of the entire program, including initialization, loading, running, saving, etc.
+    A simulation executor class used to manage the operation of the entire program, including initialization, loading, running, saving, etc.
     """
-
-
 
     def __init__(self, settings: EmuSettings) -> None:
         self._is_initialized = False
@@ -796,6 +791,7 @@ class EmuExecutor():
         self.emu_map_mem_callback = []
         self.emu_run_end_callback = []
 
+
     def init(self) -> None:
         """
         Initialize Unicorn emulation, the method must be called before calling other methods.
@@ -803,7 +799,6 @@ class EmuExecutor():
         if self._is_initialized:
             tte_log_info("EmuExecutor already initialized.")
             return
-
 
         # Unicorn instance creation
         self.mu = unicorn.Uc(self.unicorn_arch, self.unicorn_mode)
@@ -818,6 +813,7 @@ class EmuExecutor():
         self._hook_mem_unmapped()
 
         self._is_initialized = True
+
 
     @staticmethod
     def execute_preprocessing_code(preprocessing_code, emu_executor: 'EmuExecutor') -> int:
@@ -841,6 +837,7 @@ class EmuExecutor():
                 current_addr += PAGE_SIZE
 
         return 1
+
 
     def get_mu(self):
         return self.mu
@@ -910,7 +907,7 @@ class EmuExecutor():
 
 
     def _hook_mem_unmapped(self) -> None:
-        def cb_map_mem_inmapped(uc, access, address, size, value, user_data) -> bool:
+        def cb_map_mem_unmapped(uc, access, address, size, value, user_data) -> bool:
             if access == UC_MEM_READ_UNMAPPED:
                 tte_log_info(f"Hook callback: Try to read the unmapped memory at 0x{address:X}, size {size}")
             elif access == UC_MEM_WRITE_UNMAPPED:
@@ -928,9 +925,7 @@ class EmuExecutor():
                 tte_log_err(f"Hook callback: Mapping memory failed: {e}")
                 return False
 
-
-
-        self.mu.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, cb_map_mem_inmapped)
+        self.mu.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, cb_map_mem_unmapped)
 
 
     def _set_regs_init_value(self) -> None:
@@ -1639,13 +1634,14 @@ class EmuTracer():
         Create a new simulated state in the state buffer
         """
 
+        # Save the current state to the state buffer
         self.state_manager.create_state(uc,
                                         self.state_buffer.instruction,
                                         address,
                                         self.executor.get_mem_regions(),
                                         self.state_buffer.memory_patches)
 
-        # Save the current state to the state buffer
+        # Create a new state buffer
         self.state_buffer.memory_patches = []
 
         return True
@@ -1682,7 +1678,7 @@ class EmuTracer():
     def cb_mark_mem_map(self, uc):
         """
         Callback function to mark that the binary has been loaded.
-        This is used to determine whether to create a full state or a patch state.
+        This is used to determine which type of state to create next time.
         """
 
         self.state_manager.has_map_memory = True
@@ -1878,7 +1874,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
         for action_handler in self.menu_action_handlers:
             action_handler.unregister()
         self.menu_action_handlers.clear()
-
 
     def Show(self):
         self.CheckRebuild()
@@ -2212,7 +2207,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
     #     return self._JumpToWord(dblclick_word)
 
 
-    def SetDblChickCallback(self, callback):
+    def SetDblClickCallback(self, callback):
         self.dbl_click_callback = callback
 
 
@@ -2366,10 +2361,11 @@ class TTE_DisassemblyViewer():
 
     To use it following the steps:
     1. Use self.InitViewer() to initializate the viewer.
-    2. Set data: including self.memory_pages_list and self.execution_counts
-    3. Add self.viewer_widget to TimeTravelEmuViewer's layout.
-    4. Use self.DisplayMemoryRange to display memory pages in range.
-    5. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
+    2. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    3. Use self.LoadListFromESM() to statistics execution counts of code lines.
+    4. Use self.LoadState() to load state data, including self.memory_pages_list and self.execution_counts
+    5. Use self.DisplayMemoryRange() to display memory pages in range.
+    6. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
     title = "TimeTravelEmuDisassemblyViewer"
@@ -2410,11 +2406,16 @@ class TTE_DisassemblyViewer():
         self._SetMenuActions()
 
 
-    def GetCursorAddress(self):
-        lineno =  self.viewer.GetLineNo()
-        if lineno is not None:
-            return self.viewer.GetAddressFromLineNo(lineno)
-        return None
+    def _SetCustomViewerStatusBar(self):
+        # Remove original status bar
+        viewer_status_bar = self.viewer_widget.findChild(QtWidgets.QStatusBar)
+        for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
+            viewer_status_bar.removeWidget(widget)
+
+        self.statusbar_state_id_qlabel = QtWidgets.QLabel("[Status: N\\A ]")
+        viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
+        self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Memory Range: N\\A )")
+        viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
 
 
     def _SetDoubleClickCallback(self):
@@ -2455,7 +2456,14 @@ class TTE_DisassemblyViewer():
                 return True
             return False
 
-        self.viewer.SetDblChickCallback(OnDblClickAction)
+        self.viewer.SetDblClickCallback(OnDblClickAction)
+
+
+    def GetCursorAddress(self):
+        lineno =  self.viewer.GetLineNo()
+        if lineno is not None:
+            return self.viewer.GetAddressFromLineNo(lineno)
+        return None
 
 
     def _SetMenuActions(self):
@@ -2521,6 +2529,7 @@ class TTE_DisassemblyViewer():
                 self.JumpTo(target_addr)
         return None
 
+
     def SetDisplayMemoryRangeAction(self):
         assert self.memory_pages_list, "State data not loaded"
 
@@ -2569,19 +2578,13 @@ class TTE_DisassemblyViewer():
         form.Free()
 
 
-    def _SetCustomViewerStatusBar(self):
-        # Remove original status bar
-        viewer_status_bar = self.viewer_widget.findChild(QtWidgets.QStatusBar)
-        for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
-            viewer_status_bar.removeWidget(widget)
-
-        self.statusbar_state_id_qlabel = QtWidgets.QLabel("[Status: N\\A ]")
-        viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
-        self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Memory Range: N\\A )")
-        viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
-
-
     def LoadListFromESM(self, state_list: StateList):
+        """
+        Load execution counts from StateList.
+
+        Here it is believed that the state list is arranged in the order in which it was created,
+        so the execution counts of the later record must be greater than the number of previous records in the same address, and can be directly overwritten.
+        """
         self.execution_counts= {state.instruction_address: state.execution_count for _, state in state_list}
 
 
@@ -2717,7 +2720,7 @@ class TTE_DisassemblyViewer():
                         line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1)
                         self.viewer.EditLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
                     else:
-                        line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1)
+                        line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1) # TODO: fix this line_text when data size > 1
                         self.viewer.UpdateLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
                 self.hightlighting_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
 
@@ -2764,6 +2767,7 @@ class TTE_DisassemblyViewer():
 
                 current_addr_flag = ida_bytes.get_flags(current_addr)
 
+                # If the current address has a name, display it in a separate line.
                 is_named = ida_bytes.has_any_name(current_addr_flag)
                 if is_named:
                     empty_line_text = ColorfulLineGenerator.GenerateEmptyLine(current_addr, self.addr_len)
@@ -2772,6 +2776,7 @@ class TTE_DisassemblyViewer():
                     self.viewer.AddLine(current_addr, NAME_LINE, line_text)
                     address_idx += 2
 
+                # If the data at the current address is recognized as code.
                 if idc.is_code(current_addr_flag):
                     code_size = idc.get_item_size(current_addr)
                     offset = current_addr - start_addr
@@ -2785,6 +2790,7 @@ class TTE_DisassemblyViewer():
                     current_addr += code_size
                     continue
 
+                # If the data at the current address isn't recognized as code, but cached at capstone line dict and has the same bytes.
                 if current_addr in self.capstone_lines.keys():
                     code_bytes, code_size, line_text = self.capstone_lines[current_addr]
                     if code_bytes == data[current_addr - start_addr : current_addr - start_addr + code_size]:
@@ -2793,7 +2799,7 @@ class TTE_DisassemblyViewer():
                         current_addr += code_size
                         continue
 
-
+                # If the data at the current address is recognized as data.
                 if idc.is_data(current_addr_flag):
                     data_size = idc.get_item_size(current_addr)
                     offset = current_addr - start_addr
@@ -2809,6 +2815,7 @@ class TTE_DisassemblyViewer():
                     current_addr += data_size
                     continue
 
+                # Unknown address type.
                 else:
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr,
                                                                                   self.addr_len,
@@ -2842,10 +2849,11 @@ class TTE_RegistersViewer:
     a subviewer class of TimeTravelEmuViewer to display registers.
 
     To use it following the steps:
-    1. use self.InitViewer() to initializate the viewer.
-    2. use self.LoadRegisters() to load registers lines
-    3. add self.viewer_widget to TimeTravelEmuViewer's layout.
-    4. call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
+    1. Use self.InitViewer() to initializate the viewer.
+    2. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    3. Use self.SetRegisters() to load registers values for a specific state.
+    4. Use self.DisplayRegisters() to display the registers values.
+    5. Call TimeTravelEmuViewer.Show() to show the viewer with this subviewer.
     """
 
     title = "TimeTravelEmuRegistersViewer"
@@ -2855,7 +2863,7 @@ class TTE_RegistersViewer:
             super().__init__()
             self.dbl_click_callback = None
 
-        def SetDblChickCallback(self, callback):
+        def SetDblClickCallback(self, callback):
             self.dbl_click_callback = callback
 
         def OnDblClick(self, shift):
@@ -2886,8 +2894,8 @@ class TTE_RegistersViewer:
         self._SetCustomViewerStatusBar()
 
 
-    def SetDblChickCallback(self, callback):
-        self.viewer.SetDblChickCallback(callback)
+    def SetDblClickCallback(self, callback):
+        self.viewer.SetDblClickCallback(callback)
 
 
     def _SetCustomViewerStatusBar(self):
@@ -2940,8 +2948,8 @@ class TTE_MemoryViewer:
 
     To use it, follow these steps:
     1. Use self.InitViewer() to initialize the viewer.
-    2. Use self.LoadState() to load memory pages for a specific state.
-    3. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    2. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    3. Use self.LoadState() to load memory pages for a specific state.
     4. Use self.DisplayMemoryRange() to display a specific memory range.
     5. Call TimeTravelEmuViewer.Show() to show the viewer with this subviewer.
     """
@@ -3040,7 +3048,7 @@ class TTE_MemoryViewer:
                     return idaapi.jumpto(addr)
             return False
 
-        self.viewer.SetDblChickCallback(OnDblClickAction)
+        self.viewer.SetDblClickCallback(OnDblClickAction)
 
 
     def _SetMenuActions(self):
@@ -3056,6 +3064,7 @@ class TTE_MemoryViewer:
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:ExportSelectedMemoryAction",
                               self.ExportSelectedMemoryAction, "Export selected memory", "E"))
+
 
     def AddMenuActions(self, action_handler: MenuActionHandler):
         action_handler.parent_title = self.title
@@ -3518,7 +3527,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                     pass
             return False
 
-        self.registers_viewer.SetDblChickCallback(OnDblClickAction)
+        self.registers_viewer.SetDblClickCallback(OnDblClickAction)
 
 
     def OnCreate(self, form):
