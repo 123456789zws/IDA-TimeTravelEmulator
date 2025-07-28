@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.8'
+VERSION = '1.0.9'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -2140,10 +2140,10 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
 
     def GetLineNo(self, mouse = 0):
         """
-        Returns the binary address of the current line.
+        Returns the index of the current line or None if no line is selected.
 
         :param mouse: return mouse position.
-        :return: Returns the binary address or None on failure.
+        :return: Returns the line number or None on failure.
         """
         self.CheckRebuild()
         lineno = super().GetLineNo(mouse)
@@ -3033,9 +3033,11 @@ class TTE_MemoryViewer:
             """
             Action: If user double-clicks an address, jump to it in IDA View.
             """
-            addr = custom_viewer.GetLineNo() # Get the address of the clicked line
-            if addr is not None and addr != idaapi.BADADDR:
-                return idaapi.jumpto(addr)
+            lineno = custom_viewer.GetLineNo() # Get the line number of the clicked line
+            if lineno is not None:
+                addr = custom_viewer.GetAddressFromLineNo(lineno) # Get the address of the clicked line
+                if addr is not None:
+                    return idaapi.jumpto(addr)
             return False
 
         self.viewer.SetDblChickCallback(OnDblClickAction)
@@ -3443,7 +3445,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.registers_viewer.InitViewer()
         self.mempages_viewer.InitViewer()
 
-        self.SetDoubleClickCallback()
+        self.SetRegsViewerDoubleClickCallback()
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:NextStateAction",
@@ -3475,7 +3477,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:ToggleFollowCurrentInstructionAction",
-                              self.ToggleFollowCurrentInstructionAction, "Toggle follow current instruction (F)", "F"))
+                              self.ToggleFollowCurrentInstructionAction, "Toggle follow current instruction", "F"))
 
         self.mempages_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.mempages_viewer.title}:ChooseMemoryPagesAction",
@@ -3486,7 +3488,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                               lambda : self.ShowDiffsAciton(self.mempages_viewer.title, self.mempages_viewer.JumpTo),   "Show diff", "D"))
 
 
-    def SetDoubleClickCallback(self):
+    def SetRegsViewerDoubleClickCallback(self):
         """
         Set a double click callback for mempages_viewer to allow user to jump to address in disassembly_viewer.
 
