@@ -9,6 +9,7 @@ import ida_lines
 import ida_segment
 
 import logging
+import bisect
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable, Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
@@ -21,12 +22,11 @@ from sortedcontainers import SortedDict, SortedList
 from unicorn import *
 from unicorn.x86_const import *
 from capstone import *
-import bisect
 from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.6'
+VERSION = '1.0.7'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -749,8 +749,8 @@ Preprocessing Code Input
 
         self.emu_settings.start = self.sim_range_start
         self.emu_settings.end = self.sim_range_end
-        self.emu_settings.count = self.i_emulate_step_limit.value
-        self.emu_settings.time_out = self.i_time_out.value
+        self.emu_settings.count = self.GetControlValue(self.i_emulate_step_limit) # type: ignore
+        self.emu_settings.time_out = self.GetControlValue(self.i_time_out) # type: ignore
 
         # Get values directly from individual ChkInput controls
         self.emu_settings.is_load_registers = self.r_load_register.checked
@@ -3963,7 +3963,7 @@ class TimeTravelEmulator(idaapi.plugin_t):
         pass
 
     def init(self):
-        idaapi.msg("[TimeTravelEmulator] Init\n")
+        idaapi.msg(f"[TimeTravelEmulator] Init (version {VERSION})\n")
         arch = get_arch()
         if arch != "":
             # Supported architecture found.
