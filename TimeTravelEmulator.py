@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.7'
+VERSION = '1.0.8'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -134,7 +134,7 @@ UNICORN_REGISTERS_MAP = {
 
 IP_REG_NAME_MAP = {
     "x64": "RIP",
-    "x32": "EIP"
+    "x86": "EIP"
 }
 
 
@@ -2387,6 +2387,7 @@ class TTE_DisassemblyViewer():
 
         self.execution_counts = None
         self.codelines_dict:Dict[int, int] = {}  # {address : address_idx)}
+        self.capstone_lines: Dict[int, Tuple[bytes, int, str]] = {} # {address : (code_size, capstone_insn_str)}
 
 
         self.current_state = None
@@ -2506,6 +2507,9 @@ class TTE_DisassemblyViewer():
 
 
     def RefreshAction(self):
+        self.ClearHighlightLines()
+        self.ClearCodeLinesComments()
+
         self.DisplayMemoryRange(self.current_range_display_start, self.current_range_display_end)
 
 
@@ -2644,7 +2648,7 @@ class TTE_DisassemblyViewer():
                                         line.bgcolor)
 
 
-    def HighlightCurrentInsn(self):
+    def MarkCurrentInsn(self):
         assert self.current_state is not None, "State not loaded"
         assert self.memory_pages_list, "State data not loaded"
 
@@ -2658,14 +2662,21 @@ class TTE_DisassemblyViewer():
                 if self.execution_counts and self.current_insn_address in self.execution_counts:
                     count = self.execution_counts[self.current_insn_address]
                 if len(self.current_state.instruction) != 0:
-                    self.viewer.UpdateLineRange(self.current_insn_address, len(self.current_state.instruction), SINGLE_DATA_LINE,
-                                        ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
-                                                                                            self.addr_len,
-                                                                                            self.current_state.instruction,
-                                                                                            len(self.current_state.instruction),
-                                                                                            count,
-                                                                                            True),
-                                                                                            None, None)
+                    code_bytes = self.current_state.instruction
+                    code_size = len(code_bytes)
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
+                                                                                              self.addr_len,
+                                                                                              code_bytes,
+                                                                                              code_size,
+                                                                                              count,
+                                                                                              True)
+                    self.capstone_lines[self.current_insn_address] = (code_bytes, code_size, line_text)
+                    self.viewer.UpdateLineRange(self.current_insn_address,
+                                                len(self.current_state.instruction),
+                                                SINGLE_DATA_LINE,
+                                                line_text,
+                                                None,
+                                                None)
 
 
 
@@ -2710,7 +2721,7 @@ class TTE_DisassemblyViewer():
                         self.viewer.UpdateLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
                 self.hightlighting_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
 
-        self.HighlightCurrentInsn()
+        self.MarkCurrentInsn()
         self.HighlightLines()
         self.ShowCodeLinesComments()
         self.viewer.Refresh()
@@ -2763,9 +2774,10 @@ class TTE_DisassemblyViewer():
 
                 if idc.is_code(current_addr_flag):
                     code_size = idc.get_item_size(current_addr)
+                    offset = current_addr - start_addr
                     line_text = ColorfulLineGenerator.GenerateDisassemblyCodeLine(current_addr,
                                                                                        self.addr_len,
-                                                                                       data[current_addr - start_addr],
+                                                                                       data[offset : offset + code_size],
                                                                                        code_size,
                                                                                        count)
                     self.viewer.AddLine(current_addr, CODE_LINE, line_text)
@@ -2773,7 +2785,16 @@ class TTE_DisassemblyViewer():
                     current_addr += code_size
                     continue
 
-                elif idc.is_data(current_addr_flag):
+                if current_addr in self.capstone_lines.keys():
+                    code_bytes, code_size, line_text = self.capstone_lines[current_addr]
+                    if code_bytes == data[current_addr - start_addr : current_addr - start_addr + code_size]:
+                        self.viewer.AddLine(current_addr, CODE_LINE, line_text)
+                        self.codelines_dict[current_addr] = address_idx
+                        current_addr += code_size
+                        continue
+
+
+                if idc.is_data(current_addr_flag):
                     data_size = idc.get_item_size(current_addr)
                     offset = current_addr - start_addr
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr,
@@ -2787,6 +2808,7 @@ class TTE_DisassemblyViewer():
 
                     current_addr += data_size
                     continue
+
                 else:
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr,
                                                                                   self.addr_len,
@@ -2806,7 +2828,7 @@ class TTE_DisassemblyViewer():
         self.current_range_display_start = range_start
         self.current_range_display_end = range_end
 
-        self.HighlightCurrentInsn()
+        self.MarkCurrentInsn()
         self.HighlightLines()
         self.ShowCodeLinesComments()
         self.viewer.Refresh()
