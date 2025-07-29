@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.1.0'
+VERSION = '1.1.1'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -587,7 +587,6 @@ TimeTravel Emulator: Emulator Settings
                 self.EnableField(self.r_load_register, False)
             else:
                 self.EnableField(self.r_load_register, True)
-            self.EnableField(self.r_skip_syscalls, False) # [ ] TODO: Implement Skip syscalls
 
 
         # Click Yes
@@ -791,7 +790,8 @@ class EmuExecutor():
 
         self.arch = get_arch()
         self.unicorn_arch, self.unicorn_mode = UNICORN_ARCH_MAP[self.arch]
-        self.insn_pointer = ARCH_TO_INSN_POINTER_MAP[self.arch]
+        self.is_be = get_is_be()
+
         self.settings = settings
         tte_log_info("Create EmuExecutor: arch-{}, mode-{}".format(self.unicorn_arch, self.unicorn_mode))
 
@@ -823,6 +823,8 @@ class EmuExecutor():
         self._hook_mem_unmapped()
         if self.settings.is_skip_interrupts:
             self._hook_skip_interrupt()
+        if self.settings.is_skip_syscalls:
+            self._hook_skip_syscall()
 
         self._is_initialized = True
 
@@ -953,6 +955,47 @@ class EmuExecutor():
         self.add_mu_hook(UC_HOOK_INTR, cb_skip_interrupt)
 
 
+    def _hook_skip_syscall(self) -> None:
+        def cb_skip_syscall(uc, address, size, user_data):
+            tte_log_info(f"Hook callback: Skip syscall")
+
+            flags = idc.get_func_attr(address, idc.FUNCATTR_FLAGS)
+            if flags == idaapi.BADADDR:
+                return False
+            is_thunk_function = (flags & idaapi.FUNC_THUNK) != 0
+            is_lib_function = (flags & idaapi.FUNC_LIB) != 0
+
+            if is_thunk_function:
+                tte_log_info(f"Hook callback: Skip thunk function at 0x{address:X}")
+                if self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_64:
+                    stack_pointer_value = self.mu.reg_read(UC_X86_REG_RSP)
+                    return_address_bytearray = self.mu.mem_read(stack_pointer_value, 8)
+                    return_address_int = int.from_bytes(return_address_bytearray, byteorder='big' if self.is_be else 'little',  signed=False)
+
+                    self.mu.reg_write(UC_X86_REG_RIP, return_address_int)
+                    self.mu.reg_write(UC_X86_REG_RSP, stack_pointer_value + 8)
+
+                    tte_log_info(f"Hook callback: Jump to return address: 0x{return_address_int:X}")
+                    return
+
+                elif self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_32:
+                    stack_pointer_value = self.mu.reg_read(UC_X86_REG_ESP)
+                    return_address_bytearray = self.mu.mem_read(stack_pointer_value, 4)
+                    return_address_int = int.from_bytes(return_address_bytearray, byteorder='big' if self.is_be else 'little',  signed=False)
+
+                    self.mu.reg_write(UC_X86_REG_EIP, return_address_int)
+                    self.mu.reg_write(UC_X86_REG_ESP, stack_pointer_value + 4)
+
+                    tte_log_info(f"Hook callback: Jump to return address: 0x{return_address_int:X}")
+                    return
+
+
+
+
+
+        self.add_mu_hook(UC_HOOK_CODE, cb_skip_syscall)
+
+
     def _set_regs_init_value(self) -> None:
         if not self.settings.is_load_registers and self.settings.is_set_stack_value and self.unicorn_arch == UC_ARCH_X86: # Set default stack value in x86 mode
             offset = 0
@@ -1010,10 +1053,7 @@ class EmuExecutor():
         except UcError as e:
             tte_log_err(f"Emulation failed: {e}")
 
-
-
-
-        tte_log_info(f"Emulation ended: 0x{self.mu.reg_read(self.insn_pointer):X}")
+        tte_log_info(f"Emulation ended: 0x{self.mu.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch]):X}")
         tte_log_dbg("Emulation: Start calling end callback functions.")
         for callback in self.emu_run_end_callback:
             callback(self.mu)
