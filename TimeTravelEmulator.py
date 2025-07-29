@@ -162,7 +162,7 @@ def get_arch() -> str:
     return IDA_PROC_TO_ARCH_MAP[(proc_name, proc_bitness)]
 
 
-def get_arch_x64_reg_value() -> Dict[int, int]:
+def get_arch_x64_regs_value() -> Dict[int, int]:
     if not idaapi.is_debugger_on():
         return {}
     arch = get_arch()
@@ -218,7 +218,7 @@ def get_arch_x64_reg_value() -> Dict[int, int]:
     return result
 
 
-def get_arch_x86_reg_value() -> Dict[int, int]:
+def get_arch_x86_regs_value() -> Dict[int, int]:
     if not idaapi.is_debugger_on():
         return {}
     arch = get_arch()
@@ -820,11 +820,11 @@ class EmuExecutor():
         self._set_regs_init_value()
 
         # Hooks setting
-        self._hook_mem_unmapped()
         if self.settings.is_skip_interrupts:
             self._hook_skip_interrupt()
         if self.settings.is_skip_syscalls:
             self._hook_skip_syscall()
+        self._hook_mem_unmapped()
 
         self._is_initialized = True
 
@@ -936,10 +936,9 @@ class EmuExecutor():
 
             try:
                 tte_log_info(f"Hook callback: Map memory during running: 0x{address:X}, 0x{size:X}")
-
                 self._map_and_load_binary(address, address + size)
-
                 return True
+
             except UcError as e:
                 tte_log_err(f"Hook callback: Mapping memory failed: {e}")
                 return False
@@ -956,44 +955,100 @@ class EmuExecutor():
 
 
     def _hook_skip_syscall(self) -> None:
-        def cb_skip_syscall(uc, address, size, user_data):
+
+        def execute_x86_ret(uc):
+            if self.unicorn_mode == UC_MODE_64:
+                stack_pointer_value = uc.reg_read(UC_X86_REG_RSP)
+                return_address_bytearray = uc.mem_read(stack_pointer_value, 8)
+                return_address_int = int.from_bytes(return_address_bytearray, byteorder='big' if self.is_be else 'little',  signed=False)
+
+                uc.reg_write(UC_X86_REG_RIP, return_address_int)
+                uc.reg_write(UC_X86_REG_RSP, stack_pointer_value + 8)
+
+                tte_log_info(f"Hook callback: Jump to return address: 0x{return_address_int:X}")
+                return
+
+            elif self.unicorn_mode == UC_MODE_32:
+                stack_pointer_value = uc.reg_read(UC_X86_REG_ESP)
+                return_address_bytearray = uc.mem_read(stack_pointer_value, 4)
+                return_address_int = int.from_bytes(return_address_bytearray, byteorder='big' if self.is_be else 'little',  signed=False)
+
+                uc.reg_write(UC_X86_REG_EIP, return_address_int)
+                uc.reg_write(UC_X86_REG_ESP, stack_pointer_value + 4)
+
+                tte_log_info(f"Hook callback: Jump to return address: 0x{return_address_int:X}")
+                return
+
+            else:
+                return
+
+        def get_x86_call_target(uc, insn_bytes, address, size):
+            target_address = -1
+            if insn_bytes[0] == 0xE8: # Direct call
+                relative_offset = int.from_bytes(insn_bytes[1:5], byteorder = 'big' if self.is_be else 'little', signed=True)
+                target_address = address + size + relative_offset
+                tte_log_dbg(f"Direct call to 0x{target_address:X}")
+
+            elif insn_bytes[0] == 0xFF: # Indirect call
+                insn = None
+                try:
+                    insn = next(InstrctionParser().parse_instructions(insn_bytes))
+                except StopIteration:
+                    return
+
+                op_str = insn.op_str
+                if '[' not in op_str: # register indirect calls
+                    register_id = UNICORN_REGISTERS_MAP[self.arch].get(op_str.upper(), -1)
+                    if register_id != -1:
+                        target_address = uc.reg_read(register_id)
+
+                else: # memory indirect call
+                    pass # TODO: support memory indirect call calculation
+                    # reg_or_mem = op_str.strip('[]')
+                    # mem_addr = uc.reg_read(self.get_register_id(reg_or_mem))
+                    # target_address = int.from_bytes(uc.mem_read(mem_addr, uc.mode // 8), byteorder='little')
+
+                tte_log_dbg(f"Indirect call to 0x{target_address:X}")
+            return target_address
+
+
+
+        def cb_skip_thunk_func_call(uc, address, size, user_data):
             tte_log_info(f"Hook callback: Skip syscall")
 
             flags = idc.get_func_attr(address, idc.FUNCATTR_FLAGS)
             if flags == idaapi.BADADDR:
                 return False
             is_thunk_function = (flags & idaapi.FUNC_THUNK) != 0
-            is_lib_function = (flags & idaapi.FUNC_LIB) != 0
 
+            # If the function is a thunk function, detect the return address on the stack and jump to it.
             if is_thunk_function:
                 tte_log_info(f"Hook callback: Skip thunk function at 0x{address:X}")
-                if self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_64:
-                    stack_pointer_value = self.mu.reg_read(UC_X86_REG_RSP)
-                    return_address_bytearray = self.mu.mem_read(stack_pointer_value, 8)
-                    return_address_int = int.from_bytes(return_address_bytearray, byteorder='big' if self.is_be else 'little',  signed=False)
-
-                    self.mu.reg_write(UC_X86_REG_RIP, return_address_int)
-                    self.mu.reg_write(UC_X86_REG_RSP, stack_pointer_value + 8)
-
-                    tte_log_info(f"Hook callback: Jump to return address: 0x{return_address_int:X}")
-                    return
-
-                elif self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_32:
-                    stack_pointer_value = self.mu.reg_read(UC_X86_REG_ESP)
-                    return_address_bytearray = self.mu.mem_read(stack_pointer_value, 4)
-                    return_address_int = int.from_bytes(return_address_bytearray, byteorder='big' if self.is_be else 'little',  signed=False)
-
-                    self.mu.reg_write(UC_X86_REG_EIP, return_address_int)
-                    self.mu.reg_write(UC_X86_REG_ESP, stack_pointer_value + 4)
-
-                    tte_log_info(f"Hook callback: Jump to return address: 0x{return_address_int:X}")
-                    return
+                if self.unicorn_arch == UC_ARCH_X86:
+                    execute_x86_ret(uc)
 
 
+        def cb_check_call_and_skip_insn(uc, address, size, user_data):
+            tte_log_dbg(f"Hook callback: Skip unloaded function call at 0x{address:X}")
+
+            insn_bytes = uc.mem_read(address, size)
+
+            target_address = -1
+            if self.unicorn_arch == UC_ARCH_X86:
+                if insn_bytes[0] not in [0xE8, 0xFF]: # Not a call instruction
+                    return False
+                target_address = get_x86_call_target(uc, insn_bytes, address, size)
+
+            if target_address == -1:
+                return
+
+            elif target_address == idaapi.BADADDR:
+                current_insn_address = uc.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch])
+                uc.reg_write(ARCH_TO_INSN_POINTER_MAP[self.arch], current_insn_address + size)
 
 
-
-        self.add_mu_hook(UC_HOOK_CODE, cb_skip_syscall)
+        self.add_mu_hook(UC_HOOK_CODE, cb_skip_thunk_func_call)
+        self.add_mu_hook( UC_HOOK_CODE, cb_check_call_and_skip_insn)
 
 
     def _set_regs_init_value(self) -> None:
@@ -1013,7 +1068,7 @@ class EmuExecutor():
             tte_log_info(f"Init regs: Sets registers default stack regs value: sp = {DEFAULT_STACK_POINT_VALUE + offset:X}, bp = {DEFAULT_BASE_POINT_VALUE + offset:X}")
 
         elif self.settings.is_load_registers and self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_64:
-            for reg_id, reg_value in get_arch_x64_reg_value().items():
+            for reg_id, reg_value in get_arch_x64_regs_value().items():
                 if reg_value is not None:
                     self.mu.reg_write(reg_id, reg_value)
                     tte_log_info(f"Init regs: Sets register ID {reg_id} value: 0x{reg_value:X}")
@@ -1021,7 +1076,7 @@ class EmuExecutor():
                     tte_log_info(f"Init regs: Skip register ID {reg_id} value: None")
 
         elif self.settings.is_load_registers and self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_32:
-            for reg_id, reg_value in get_arch_x86_reg_value().items():
+            for reg_id, reg_value in get_arch_x86_regs_value().items():
                 if reg_value is not None:
                     self.mu.reg_write(reg_id, reg_value)
                     tte_log_info(f"Init regs: Sets register ID {reg_id} value: 0x{reg_value:X}")
@@ -1772,8 +1827,10 @@ class InstrctionParser():
         self.capstone_arch, self.capstone_mode = CAPSTONE_ARCH_MAP[self.arch]
         self.md = Cs(self.capstone_arch, self.capstone_mode)
 
+    def parse_instructions(self, insn_bytes: bytes):
+        return self.md.disasm(insn_bytes, 0)
 
-    def parse_instruction(self, insn_bytes: bytes) -> str:
+    def parse_instruction_to_str(self, insn_bytes: bytes) -> str:
         """
         Parses an instruction and returns a string of the form "opcode operand"
         """
@@ -3706,7 +3763,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             def OnInit(self):
                 self.items = [[str(i),
                         state_id,
-                        InstrctionParser().parse_instruction(state.instruction)]
+                        InstrctionParser().parse_instruction_to_str(state.instruction)]
                         for i, (state_id, state) in enumerate(self.state_list)]
                 return True
 
