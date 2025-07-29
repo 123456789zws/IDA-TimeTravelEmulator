@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.11'
+VERSION = '1.1.0'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -489,7 +489,8 @@ class EmuSettings():
     end: int = -1
 
     is_load_registers: bool = False
-    is_jump_over_syscalls: bool = False
+    is_skip_interrupts = False
+    is_skip_syscalls: bool = False
     is_set_stack_value: bool = False
 
     time_out: int = 0
@@ -513,7 +514,10 @@ class EmuSettingsForm(idaapi.Form):
 
         self.c_configs_group: Optional[ida_kernwin.Form.ChkGroupControl] = None
         self.r_load_register: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
-        self.r_jump_over_syscalls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+
+
+        self.r_skip_interrupts: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+        self.r_skip_syscalls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
         self.r_set_stack_value: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
 
         self.i_log_level: Optional[ida_kernwin.Form.DropdownListControl] = None
@@ -536,7 +540,8 @@ TimeTravel Emulator: Emulator Settings
             <Emluate time out    :{i_time_out}>
 
             <load registers:{r_load_register}>
-            <Jump over syscalls:{r_jump_over_syscalls}>
+            <Skip interrupts:{r_skip_interrupts}>
+            <Skip syscalls:{r_skip_syscalls}>
             <Set stack value:{r_set_stack_value}>{c_configs_group}>
 
             <Log level:{i_log_level}>
@@ -555,7 +560,7 @@ TimeTravel Emulator: Emulator Settings
 
                 'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=500, swidth = 30),
                 "i_time_out": self.NumericInput(self.FT_DEC, value=0, swidth = 30),
-                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_jump_over_syscalls", "r_set_stack_value")),
+                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_skip_interrupts", "r_skip_syscalls", "r_set_stack_value")),
 
 
                 'i_log_level': self.DropdownListControl(
@@ -574,7 +579,7 @@ TimeTravel Emulator: Emulator Settings
 
     def _on_form_change(self, fid: int):
         assert self.r_load_register is not None, "r_load_register is not initialized"
-        assert self.r_jump_over_syscalls is not None, "r_jump_over_syscalls is not initialized"
+        assert self.r_skip_syscalls is not None, "r_skip_syscalls is not initialized"
 
         # Init
         if fid == -1:
@@ -582,7 +587,7 @@ TimeTravel Emulator: Emulator Settings
                 self.EnableField(self.r_load_register, False)
             else:
                 self.EnableField(self.r_load_register, True)
-            self.EnableField(self.r_jump_over_syscalls, False) # [ ] TODO: Implement jump over syscalls
+            self.EnableField(self.r_skip_syscalls, False) # [ ] TODO: Implement Skip syscalls
 
 
         # Click Yes
@@ -598,8 +603,8 @@ TimeTravel Emulator: Emulator Settings
 
     def set_default_values(self):
         assert self.r_load_register is not None \
-            and self.r_set_stack_value is not None, "r_load_register is not initialized"
-
+            and self.r_set_stack_value is not None \
+            and self.r_skip_interrupts is not None
 
         self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
 
@@ -609,6 +614,8 @@ TimeTravel Emulator: Emulator Settings
         else:
             self.r_load_register.checked = False
             self.r_set_stack_value.checked = True
+
+        self.r_skip_interrupts.checked = True
 
 
     def _open_select_function_dialog(self, code = 0):
@@ -736,7 +743,8 @@ Preprocessing Code Input
            self.c_configs_group is None or \
            self.i_time_out is None or \
            self.r_load_register is None or \
-           self.r_jump_over_syscalls is None or \
+           self.r_skip_interrupts is None or \
+           self.r_skip_syscalls is None or \
            self.r_set_stack_value is None or \
            self.i_log_level is None or \
            self.i_log_file_path is None:
@@ -745,13 +753,14 @@ Preprocessing Code Input
 
         self.emu_settings.start = self.sim_range_start
         self.emu_settings.end = self.sim_range_end
+
         self.emu_settings.count = self.GetControlValue(self.i_emulate_step_limit) # type: ignore
         self.emu_settings.time_out = self.GetControlValue(self.i_time_out) # type: ignore
 
-        # Get values directly from individual ChkInput controls
-        self.emu_settings.is_load_registers = self.r_load_register.checked
-        self.emu_settings.is_jump_over_syscalls = self.r_jump_over_syscalls.checked
-        self.emu_settings.is_set_stack_value = self.r_set_stack_value.checked
+        self.emu_settings.is_load_registers = self.GetControlValue(self.r_load_register) # type: ignore
+        self.emu_settings.is_skip_interrupts = self.GetControlValue(self.r_skip_interrupts) # type: ignore
+        self.emu_settings.is_skip_syscalls = self.GetControlValue(self.r_skip_syscalls) # type: ignore
+        self.emu_settings.is_set_stack_value = self.GetControlValue(self.r_set_stack_value) # type: ignore
 
         self.emu_settings.preprocessing_code = self.preprocessing_code
 
@@ -764,7 +773,7 @@ Preprocessing Code Input
 
         log_level_value: int = self.GetControlValue(self.i_log_level) # type: ignore
         self.emu_settings.log_level = log_level_map.get(log_level_value, logging.WARNING)
-        self.emu_settings.log_file_path = self.i_log_file_path.value
+        self.emu_settings.log_file_path = self.GetControlValue(self.i_log_file_path) # type: ignore
 
 
     def GetSetting(self):
@@ -812,6 +821,8 @@ class EmuExecutor():
 
         # Hooks setting
         self._hook_mem_unmapped()
+        if self.settings.is_skip_interrupts:
+            self._hook_skip_interrupt()
 
         self._is_initialized = True
 
@@ -932,6 +943,14 @@ class EmuExecutor():
                 return False
 
         self.add_mu_hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, cb_map_mem_unmapped)
+
+
+    def _hook_skip_interrupt(self) -> None:
+        def cb_skip_interrupt(uc, intno, user_data) -> bool:
+            tte_log_info(f"Hook callback: Skip interrupt: {intno}")
+            return True
+
+        self.add_mu_hook(UC_HOOK_INTR, cb_skip_interrupt)
 
 
     def _set_regs_init_value(self) -> None:
@@ -1624,7 +1643,7 @@ class EmuTracer():
 
     def cb_catch_insn_execution(self, uc, address, size, user_data) -> bool:
         tte_log_dbg(message=f"Tracing instruction at 0x{address:X}, instruction size = {size:X}")
-        _, _, opcode, operand = next(self.md.disasm_lite(uc.mem_read(address, size), 0))
+        opcode, operand = InstrctionParser().parse_instruction_to_tuple(uc.mem_read(address, size))
         tte_log_dbg("Executing instruction:    %s\t%s" % (opcode, operand))
         self.state_buffer.instruction = bytes(uc.mem_read(address, size))
         return True
