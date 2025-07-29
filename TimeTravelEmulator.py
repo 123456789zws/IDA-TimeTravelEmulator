@@ -26,7 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.10'
+VERSION = '1.0.11'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -790,6 +790,7 @@ class EmuExecutor():
 
         self.emu_map_mem_callback = []
         self.emu_run_end_callback = []
+        self.mu_hook_handlers = []
 
 
     def init(self) -> None:
@@ -822,11 +823,11 @@ class EmuExecutor():
         """
         if(len(preprocessing_code) == 0):
             return 1
-        idaapi.msg("Executing preprocessing code...\n")
+        # idaapi.msg("Executing preprocessing code...\n")
         try:
             exec(preprocessing_code)
         except Exception as e:
-            idaapi.msg(f"Error executing preprocessing code: {e}")
+            idaapi.msg(f"Error executing preprocessing code: {e}\n")
             return idaapi.ask_yn(0, f"Error executing preprocessing code: {e}\nDo you want to continue?")
 
         mem_regions_iter = emu_executor.get_mu().mem_regions()
@@ -841,6 +842,11 @@ class EmuExecutor():
 
     def get_mu(self):
         return self.mu
+
+
+    def add_mu_hook(self, htype: int, callback, user_data = None, begin: int = 1, end: int = 0) -> None:
+        handler = self.mu.hook_add(htype, callback, user_data, begin, end)
+        self.mu_hook_handlers.append(handler)
 
 
     def _is_memory_mapped(self, address) -> bool:
@@ -925,7 +931,7 @@ class EmuExecutor():
                 tte_log_err(f"Hook callback: Mapping memory failed: {e}")
                 return False
 
-        self.mu.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, cb_map_mem_unmapped)
+        self.add_mu_hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, cb_map_mem_unmapped)
 
 
     def _set_regs_init_value(self) -> None:
@@ -960,9 +966,6 @@ class EmuExecutor():
                 else:
                     tte_log_info(f"Init regs: Skip register ID {reg_id} value: None")
 
-
-    def add_mu_hook(self, htype: int, callback, user_data = None, begin: int = 1, end: int = 0) -> int:
-        return self.mu.hook_add(htype, callback, user_data, begin, end)
 
     CUSTOM_HOOK_MEM_MAP = 0
     CUSTOM_HOOK_EXECUTE_END = 1
@@ -1007,6 +1010,9 @@ class EmuExecutor():
             return
 
         self.mu.emu_stop()
+        for handler in self.mu_hook_handlers:
+            self.mu.hook_del(handler)
+
         self.emu_run_end_callback.clear()
         self.emu_map_mem_callback.clear()
         self.loaded_pages.clear()
