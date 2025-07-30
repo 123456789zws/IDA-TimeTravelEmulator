@@ -39,7 +39,7 @@ English | [中文](README.zh_CN.md)
 
 ## Quick Start
 
-<img width="493" height="535" alt="image" src="https://github.com/user-attachments/assets/8eba2efd-e6ad-4527-b6e5-aa0e5ddcf094" />
+<img width="483" height="585" alt="image" src="https://github.com/user-attachments/assets/315d56fe-7599-49b0-a9c1-b2285d43b8a8" />
 
 Press the hotkey `Shift+T` to open the `TimeTravel Emulator: Emulator Settings` dialog.
 
@@ -77,7 +77,7 @@ int main() {
 Source code of a simple program for emulation.
 
 ### Emulator Settings dialog
-<img width="2333" height="1070" alt="image" src="https://github.com/user-attachments/assets/20857a2e-1f05-4e07-b3f4-ca401d483b0e" />
+<img width="2312" height="1281" alt="image" src="https://github.com/user-attachments/assets/f30f80ac-c19a-4dc0-9fd0-a61201993bf1" />
 
 Opening the emulation settings dialog by selecting code and using `Shift+T`.
 
@@ -87,18 +87,21 @@ In the settings dialog, configure the emulation parameters:
 * **Emulate step limit**: Set a limit on the number of instructions to emulate.
 * **Emulate time out**: Set a time limit for the emulation run.
 * **load registers**: Choose whether to load current register values (effective in debug mode).
-* **Jump over syscalls**: (TODO: Not yet implemented) Decide whether to skip system call functions.
 * **Set Stack value**: Configure special stack frame register values.
+
+* **Skip interrupts**: Skip `int` instructions during simulation
+* **Skip unloaded calls**: Skip the call instructions whose target address not loaded
+* **Skip thunk functions**: Skip thunk functions during simulation
+
 * **Log level & Log file path**: Set logging level and save location for logs.
 
-<img width="1433" height="867" alt="image" src="https://github.com/user-attachments/assets/ffef8d4e-f2db-43cb-b2d0-3f12c3082b6b" />
+<img width="1652" height="971" alt="image" src="https://github.com/user-attachments/assets/a57468de-f946-448c-8bcd-8300ef4d79e9" />
 
 * **Set custom preprocessing code**: Add custom Python code to execute before emulation. This can be used to set up memory, register values, or add hooks.
 
 
 ### Time Travel Emulator View
-
-![Opening Time Travel Emulator View](https://github.com/user-attachments/assets/02d625d2-fac3-4271-a58d-1325fca32318)
+![recording 4](https://github.com/user-attachments/assets/51ed9758-250c-44a7-a5b5-a98a99dfd250)
 
 Click "Emulate" to start the emulation. When the emulation is completed, a new window will open displaying the disassembly, register, and memory views, starting from the first emulated state.
 
@@ -152,7 +155,7 @@ Use hotkey `D` to open the difference chooser view. This view automatically upda
 
 #### Debugging Mode
 
-![Deubugging registers load](https://github.com/user-attachments/assets/b55cc289-dfd4-4574-b066-1440192b221f)
+<img width="2552" height="921" alt="image" src="https://github.com/user-attachments/assets/e0d2697b-3260-4e67-8aeb-8ddcaec43a80" />
 
 The plugin supports emulation in IDA's debugging mode and can automatically load the current register values.
 
