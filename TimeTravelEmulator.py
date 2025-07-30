@@ -490,6 +490,7 @@ class EmuSettings():
 
     is_load_registers: bool = False
     is_skip_interrupts = False
+    is_skip_unloaded_calls = True
     is_skip_syscalls: bool = False
     is_set_stack_value: bool = False
 
@@ -517,6 +518,7 @@ class EmuSettingsForm(idaapi.Form):
 
 
         self.r_skip_interrupts: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+        self.r_skip_unloaded_calls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
         self.r_skip_syscalls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
         self.r_set_stack_value: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
 
@@ -541,6 +543,7 @@ TimeTravel Emulator: Emulator Settings
 
             <load registers:{r_load_register}>
             <Skip interrupts:{r_skip_interrupts}>
+            <Skip unloaded calls:{r_skip_unloaded_calls}>
             <Skip syscalls:{r_skip_syscalls}>
             <Set stack value:{r_set_stack_value}>{c_configs_group}>
 
@@ -560,7 +563,7 @@ TimeTravel Emulator: Emulator Settings
 
                 'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=500, swidth = 30),
                 "i_time_out": self.NumericInput(self.FT_DEC, value=0, swidth = 30),
-                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_skip_interrupts", "r_skip_syscalls", "r_set_stack_value")),
+                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_skip_interrupts", "r_skip_unloaded_calls", "r_skip_syscalls", "r_set_stack_value")),
 
 
                 'i_log_level': self.DropdownListControl(
@@ -603,7 +606,8 @@ TimeTravel Emulator: Emulator Settings
     def set_default_values(self):
         assert self.r_load_register is not None \
             and self.r_set_stack_value is not None \
-            and self.r_skip_interrupts is not None
+            and self.r_skip_interrupts is not None \
+            and self.r_skip_unloaded_calls is not None \
 
         self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
 
@@ -615,6 +619,7 @@ TimeTravel Emulator: Emulator Settings
             self.r_set_stack_value.checked = True
 
         self.r_skip_interrupts.checked = True
+        self.r_skip_unloaded_calls.checked = True
 
 
     def _open_select_function_dialog(self, code = 0):
@@ -743,6 +748,7 @@ Preprocessing Code Input
            self.i_time_out is None or \
            self.r_load_register is None or \
            self.r_skip_interrupts is None or \
+           self.r_skip_unloaded_calls is None or \
            self.r_skip_syscalls is None or \
            self.r_set_stack_value is None or \
            self.i_log_level is None or \
@@ -758,6 +764,7 @@ Preprocessing Code Input
 
         self.emu_settings.is_load_registers = self.GetControlValue(self.r_load_register) # type: ignore
         self.emu_settings.is_skip_interrupts = self.GetControlValue(self.r_skip_interrupts) # type: ignore
+        self.emu_settings.is_skip_unloaded_calls = self.GetControlValue(self.r_skip_unloaded_calls) # type: ignore
         self.emu_settings.is_skip_syscalls = self.GetControlValue(self.r_skip_syscalls) # type: ignore
         self.emu_settings.is_set_stack_value = self.GetControlValue(self.r_set_stack_value) # type: ignore
 
@@ -824,6 +831,8 @@ class EmuExecutor():
             self._hook_skip_interrupt()
         if self.settings.is_skip_syscalls:
             self._hook_skip_syscall()
+        if self.settings.is_skip_unloaded_calls:
+            self._hook_skip_unloaded_call()
         self._hook_mem_unmapped()
 
         self._is_initialized = True
@@ -982,6 +991,25 @@ class EmuExecutor():
             else:
                 return
 
+        def cb_skip_thunk_func_call(uc, address, size, user_data):
+            tte_log_info(f"Hook callback: Skip syscall")
+
+            flags = idc.get_func_attr(address, idc.FUNCATTR_FLAGS)
+            if flags == idaapi.BADADDR:
+                return False
+            is_thunk_function = (flags & idaapi.FUNC_THUNK) != 0
+
+            # If the function is a thunk function, detect the return address on the stack and jump to it.
+            if is_thunk_function:
+                tte_log_info(f"Hook callback: Skip thunk function at 0x{address:X}")
+                if self.unicorn_arch == UC_ARCH_X86:
+                    execute_x86_ret(uc)
+
+        self.add_mu_hook(UC_HOOK_CODE, cb_skip_thunk_func_call)
+
+
+    def _hook_skip_unloaded_call(self) -> None:
+
         def get_x86_call_target(uc, insn_bytes, address, size):
             target_address = -1
             if insn_bytes[0] == 0xE8: # Direct call
@@ -1011,24 +1039,7 @@ class EmuExecutor():
                 tte_log_dbg(f"Indirect call to 0x{target_address:X}")
             return target_address
 
-
-
-        def cb_skip_thunk_func_call(uc, address, size, user_data):
-            tte_log_info(f"Hook callback: Skip syscall")
-
-            flags = idc.get_func_attr(address, idc.FUNCATTR_FLAGS)
-            if flags == idaapi.BADADDR:
-                return False
-            is_thunk_function = (flags & idaapi.FUNC_THUNK) != 0
-
-            # If the function is a thunk function, detect the return address on the stack and jump to it.
-            if is_thunk_function:
-                tte_log_info(f"Hook callback: Skip thunk function at 0x{address:X}")
-                if self.unicorn_arch == UC_ARCH_X86:
-                    execute_x86_ret(uc)
-
-
-        def cb_check_call_and_skip_insn(uc, address, size, user_data):
+        def cb_check_call_target_loaded_and_skip(uc, address, size, user_data):
             tte_log_dbg(f"Hook callback: Skip unloaded function call at 0x{address:X}")
 
             insn_bytes = uc.mem_read(address, size)
@@ -1042,13 +1053,11 @@ class EmuExecutor():
             if target_address == -1:
                 return
 
-            elif target_address == idaapi.BADADDR:
+            elif not ida_bytes.is_loaded(target_address):
                 current_insn_address = uc.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch])
                 uc.reg_write(ARCH_TO_INSN_POINTER_MAP[self.arch], current_insn_address + size)
 
-
-        self.add_mu_hook(UC_HOOK_CODE, cb_skip_thunk_func_call)
-        self.add_mu_hook( UC_HOOK_CODE, cb_check_call_and_skip_insn)
+        self.add_mu_hook( UC_HOOK_CODE, cb_check_call_target_loaded_and_skip)
 
 
     def _set_regs_init_value(self) -> None:
