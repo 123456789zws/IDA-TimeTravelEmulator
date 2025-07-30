@@ -542,10 +542,10 @@ TimeTravel Emulator: Emulator Settings
             <Emluate time out    :{i_time_out}>
 
             <load registers:{r_load_register}>
+            <Set stack value:{r_set_stack_value}>
             <Skip interrupts:{r_skip_interrupts}>
             <Skip unloaded calls:{r_skip_unloaded_calls}>
-            <Skip thunk functions:{r_skip_thunk_funcs}>
-            <Set stack value:{r_set_stack_value}>{c_configs_group}>
+            <Skip thunk functions:{r_skip_thunk_funcs}>{c_configs_group}>
 
             <Log level:{i_log_level}>
             <Log file path:{i_log_file_path}>
@@ -563,7 +563,7 @@ TimeTravel Emulator: Emulator Settings
 
                 'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=500, swidth = 30),
                 "i_time_out": self.NumericInput(self.FT_DEC, value=0, swidth = 30),
-                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_skip_interrupts", "r_skip_unloaded_calls", "r_skip_thunk_funcs", "r_set_stack_value")),
+                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_set_stack_value", "r_skip_interrupts", "r_skip_unloaded_calls", "r_skip_thunk_funcs")),
 
 
                 'i_log_level': self.DropdownListControl(
