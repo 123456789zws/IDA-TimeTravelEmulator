@@ -491,7 +491,7 @@ class EmuSettings():
     is_load_registers: bool = False
     is_skip_interrupts = False
     is_skip_unloaded_calls = True
-    is_skip_syscalls: bool = False
+    is_skip_trunk_funcs: bool = False
     is_set_stack_value: bool = False
 
     time_out: int = 0
@@ -519,7 +519,7 @@ class EmuSettingsForm(idaapi.Form):
 
         self.r_skip_interrupts: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
         self.r_skip_unloaded_calls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
-        self.r_skip_syscalls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+        self.r_skip_thunk_funcs: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
         self.r_set_stack_value: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
 
         self.i_log_level: Optional[ida_kernwin.Form.DropdownListControl] = None
@@ -544,7 +544,7 @@ TimeTravel Emulator: Emulator Settings
             <load registers:{r_load_register}>
             <Skip interrupts:{r_skip_interrupts}>
             <Skip unloaded calls:{r_skip_unloaded_calls}>
-            <Skip syscalls:{r_skip_syscalls}>
+            <Skip thunk functions:{r_skip_thunk_funcs}>
             <Set stack value:{r_set_stack_value}>{c_configs_group}>
 
             <Log level:{i_log_level}>
@@ -563,7 +563,7 @@ TimeTravel Emulator: Emulator Settings
 
                 'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=500, swidth = 30),
                 "i_time_out": self.NumericInput(self.FT_DEC, value=0, swidth = 30),
-                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_skip_interrupts", "r_skip_unloaded_calls", "r_skip_syscalls", "r_set_stack_value")),
+                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_skip_interrupts", "r_skip_unloaded_calls", "r_skip_thunk_funcs", "r_set_stack_value")),
 
 
                 'i_log_level': self.DropdownListControl(
@@ -582,7 +582,7 @@ TimeTravel Emulator: Emulator Settings
 
     def _on_form_change(self, fid: int):
         assert self.r_load_register is not None, "r_load_register is not initialized"
-        assert self.r_skip_syscalls is not None, "r_skip_syscalls is not initialized"
+        assert self.r_skip_thunk_funcs is not None, "r_skip_thunk_funcs is not initialized"
 
         # Init
         if fid == -1:
@@ -608,6 +608,7 @@ TimeTravel Emulator: Emulator Settings
             and self.r_set_stack_value is not None \
             and self.r_skip_interrupts is not None \
             and self.r_skip_unloaded_calls is not None \
+            and self.r_skip_thunk_funcs is not None \
 
         self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
 
@@ -617,6 +618,7 @@ TimeTravel Emulator: Emulator Settings
         else:
             self.r_load_register.checked = False
             self.r_set_stack_value.checked = True
+            self.r_skip_thunk_funcs.checked = True
 
         self.r_skip_interrupts.checked = True
         self.r_skip_unloaded_calls.checked = True
@@ -749,7 +751,7 @@ Preprocessing Code Input
            self.r_load_register is None or \
            self.r_skip_interrupts is None or \
            self.r_skip_unloaded_calls is None or \
-           self.r_skip_syscalls is None or \
+           self.r_skip_thunk_funcs is None or \
            self.r_set_stack_value is None or \
            self.i_log_level is None or \
            self.i_log_file_path is None:
@@ -765,7 +767,7 @@ Preprocessing Code Input
         self.emu_settings.is_load_registers = self.GetControlValue(self.r_load_register) # type: ignore
         self.emu_settings.is_skip_interrupts = self.GetControlValue(self.r_skip_interrupts) # type: ignore
         self.emu_settings.is_skip_unloaded_calls = self.GetControlValue(self.r_skip_unloaded_calls) # type: ignore
-        self.emu_settings.is_skip_syscalls = self.GetControlValue(self.r_skip_syscalls) # type: ignore
+        self.emu_settings.is_skip_trunk_funcs = self.GetControlValue(self.r_skip_thunk_funcs) # type: ignore
         self.emu_settings.is_set_stack_value = self.GetControlValue(self.r_set_stack_value) # type: ignore
 
         self.emu_settings.preprocessing_code = self.preprocessing_code
@@ -829,8 +831,8 @@ class EmuExecutor():
         # Hooks setting
         if self.settings.is_skip_interrupts:
             self._hook_skip_interrupt()
-        if self.settings.is_skip_syscalls:
-            self._hook_skip_syscall()
+        if self.settings.is_skip_trunk_funcs:
+            self._hook_skip_thunk_funcs()
         if self.settings.is_skip_unloaded_calls:
             self._hook_skip_unloaded_call()
         self._hook_mem_unmapped()
@@ -963,7 +965,7 @@ class EmuExecutor():
         self.add_mu_hook(UC_HOOK_INTR, cb_skip_interrupt)
 
 
-    def _hook_skip_syscall(self) -> None:
+    def _hook_skip_thunk_funcs(self) -> None:
 
         def execute_x86_ret(uc):
             if self.unicorn_mode == UC_MODE_64:
@@ -992,7 +994,6 @@ class EmuExecutor():
                 return
 
         def cb_skip_thunk_func_call(uc, address, size, user_data):
-            tte_log_info(f"Hook callback: Skip syscall")
 
             flags = idc.get_func_attr(address, idc.FUNCATTR_FLAGS)
             if flags == idaapi.BADADDR:
@@ -1040,8 +1041,6 @@ class EmuExecutor():
             return target_address
 
         def cb_check_call_target_loaded_and_skip(uc, address, size, user_data):
-            tte_log_dbg(f"Hook callback: Skip unloaded function call at 0x{address:X}")
-
             insn_bytes = uc.mem_read(address, size)
 
             target_address = -1
@@ -1054,6 +1053,7 @@ class EmuExecutor():
                 return
 
             elif not ida_bytes.is_loaded(target_address):
+                tte_log_dbg(f"Hook callback: Skip unloaded call target: 0x{target_address:X}")
                 current_insn_address = uc.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch])
                 uc.reg_write(ARCH_TO_INSN_POINTER_MAP[self.arch], current_insn_address + size)
 
