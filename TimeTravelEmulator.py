@@ -2528,7 +2528,6 @@ class TTE_DisassemblyViewer():
         self.hightlighting_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, lineno, color),...]
         self.code_lines_comments: List[Tuple[int, bool, str]] = [] # [(address, has_show, comment),...]
 
-
     def InitViewer(self):
         self.viewer.Create(self.title)
         self.viewer_widget  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
@@ -3671,9 +3670,18 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.disassembly_viewer.UnregisterAction()
         self.mempages_viewer.UnregisterAction()
 
+        del self.disassembly_viewer
+        del self.registers_viewer
+        del self.mempages_viewer
+
         for sub_chooser in self.subchooser_list:
             if sub_chooser:
                 sub_chooser.Close()
+
+        del self.subchooser_list
+        del self.state_manager
+        del self.state_list
+
 
 
     def LoadESM(self, state_manager: EmuStateManager):
