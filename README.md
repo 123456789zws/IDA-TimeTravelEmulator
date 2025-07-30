@@ -101,7 +101,7 @@ In the settings dialog, configure the emulation parameters:
 
 
 ### Time Travel Emulator View
-![recording 4](https://github.com/user-attachments/assets/51ed9758-250c-44a7-a5b5-a98a99dfd250)
+![Opening Time Travel Emulator View](https://github.com/user-attachments/assets/51ed9758-250c-44a7-a5b5-a98a99dfd250)
 
 Click "Emulate" to start the emulation. When the emulation is completed, a new window will open displaying the disassembly, register, and memory views, starting from the first emulated state.
 

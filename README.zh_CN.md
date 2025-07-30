@@ -39,7 +39,7 @@
 
 ## 快速入门
 
-<img width="493" height="535" alt="image" src="https://github.com/user-attachments/assets/8eba2efd-e6ad-4527-b6e5-aa0e5ddcf094" />
+<img width="483" height="585" alt="image" src="https://github.com/user-attachments/assets/315d56fe-7599-49b0-a9c1-b2285d43b8a8" />
 
 按下快捷键 `Shift+T` 打开 `EmuTrace: Emulator Settings` (模拟器设置) 对话框。
 
@@ -78,8 +78,7 @@ int main() {
 用于仿真的示例程序源代码。
 
 ### 模拟器设置对话框
-
-<img width="2333" height="1070" alt="image" src="https://github.com/user-attachments/assets/20857a2e-1f05-4e07-b3f4-ca401d483b0e" />
+<img width="2312" height="1281" alt="image" src="https://github.com/user-attachments/assets/f30f80ac-c19a-4dc0-9fd0-a61201993bf1" />
 
 选择要仿真的代码并使用快捷键 `Shift+T` 打开仿真设置对话框。
 
@@ -91,19 +90,23 @@ int main() {
 * **Emulate time out**: 模拟运行的运行时间限制
 
 * **load registers**: 是否加载当前的寄存器值(在调试模式下生效)
-* **Jump over syscalls**: 是否跳过系统调用函数(TODO: 暂时未实现)
-- **Set Stack value**: 是否设置特殊的栈帧寄存器值
+* **Set Stack value**: 是否设置特殊的栈帧寄存器值
+
+* **Skip interrupts**：在模拟过程中跳过`int`指令
+* **Skip unloaded calls**：跳过目标地址未被加载的`call`指令
+* **Skip thunk functions**：在模拟过程中跳过thunk函数
 
 * **Log level & Log file path**: 日志记录等级和保存位置
 
-<img width="1433" height="867" alt="image" src="https://github.com/user-attachments/assets/ffef8d4e-f2db-43cb-b2d0-3f12c3082b6b" />
+<img width="1652" height="971" alt="image" src="https://github.com/user-attachments/assets/a57468de-f946-448c-8bcd-8300ef4d79e9" />
 
 * **Set custom preprocessing code**: 设置自定义的预处理代码，这些代码将会在模拟运行前执行。你可以使用此功能提前设置内存、寄存器值或添加Hook
 
 
 ### 时间旅行仿真器视图
 
-![Opening Time Travel Emulator View](https://github.com/user-attachments/assets/02d625d2-fac3-4271-a58d-1325fca32318)
+![Opening Time Travel Emulator View](https://github.com/user-attachments/assets/51ed9758-250c-44a7-a5b5-a98a99dfd250)
+
 
 点击 "Emulate" 开始仿真。仿真完成后，将打开一个新窗口，显示从第一个模拟状态开始的反汇编、寄存器和内存视图。
 
@@ -164,7 +167,7 @@ int main() {
 
 #### 调试模式
 
-![Deubugging registers load](https://github.com/user-attachments/assets/b55cc289-dfd4-4574-b066-1440192b221f)
+<img width="2552" height="921" alt="image" src="https://github.com/user-attachments/assets/e0d2697b-3260-4e67-8aeb-8ddcaec43a80" />
 
 该插件支持在 IDA 的调试模式下进行仿真，并可以自动加载当前寄存器值。
 
