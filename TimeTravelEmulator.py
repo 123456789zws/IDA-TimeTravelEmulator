@@ -9,6 +9,7 @@ import ida_lines
 import ida_segment
 
 import logging
+import bisect
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable, Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
@@ -21,12 +22,11 @@ from sortedcontainers import SortedDict, SortedList
 from unicorn import *
 from unicorn.x86_const import *
 from capstone import *
-import bisect
 from PyQt5 import QtCore, QtWidgets
 
 
 
-VERSION = '1.0.3'
+VERSION = '1.1.1'
 
 PLUGIN_NAME = 'TimeTravelEmulator'
 PLUGIN_HOTKEY = 'Shift+T'
@@ -49,11 +49,9 @@ PAGE_MASK = ~(PAGE_SIZE - 1)
 # Define default page permission
 DEFAULT_PAGE_PERMISSION = UC_PROT_WRITE | UC_PROT_READ
 
-
-# Define default stack and base point values
+# Define default stack and frame values
 DEFAULT_STACK_POINT_VALUE = 0x70000000
 DEFAULT_BASE_POINT_VALUE = DEFAULT_STACK_POINT_VALUE
-
 
 
 UNICORN_ARCH_MAP =      {
@@ -88,6 +86,7 @@ UNICORN_REGISTERS_MAP = {
         "RDI": UC_X86_REG_RDI,
         "RBP": UC_X86_REG_RBP,
         "RSP": UC_X86_REG_RSP,
+        "RIP": UC_X86_REG_RIP,
         "R8": UC_X86_REG_R8,
         "R9": UC_X86_REG_R9,
         "R10": UC_X86_REG_R10,
@@ -97,7 +96,6 @@ UNICORN_REGISTERS_MAP = {
         "R14": UC_X86_REG_R14,
         "R15": UC_X86_REG_R15,
         # Instruction Pointer
-        "RIP": UC_X86_REG_RIP,
         # Flags Register
         "Rflags": UC_X86_REG_EFLAGS, # In 64-bit, EFLAGS is extended to RFLAGS, but the constant remains EFLAGS
         # Segment Registers
@@ -134,11 +132,8 @@ UNICORN_REGISTERS_MAP = {
 
 IP_REG_NAME_MAP = {
     "x64": "RIP",
-    "x32": "EIP"
+    "x86": "EIP"
 }
-
-
-
 
 IDA_PERM_TO_UC_PERM_MAP = {
     ida_segment.SEGPERM_EXEC : UC_PROT_EXEC,
@@ -167,7 +162,7 @@ def get_arch() -> str:
     return IDA_PROC_TO_ARCH_MAP[(proc_name, proc_bitness)]
 
 
-def get_arch_x64_reg_value() -> Dict[int, int]:
+def get_arch_x64_regs_value() -> Dict[int, int]:
     if not idaapi.is_debugger_on():
         return {}
     arch = get_arch()
@@ -223,7 +218,7 @@ def get_arch_x64_reg_value() -> Dict[int, int]:
     return result
 
 
-def get_arch_x86_reg_value() -> Dict[int, int]:
+def get_arch_x86_regs_value() -> Dict[int, int]:
     if not idaapi.is_debugger_on():
         return {}
     arch = get_arch()
@@ -480,7 +475,6 @@ def tte_log_warn(message):
     """
     TTE_Logger().log(logging.WARNING,message)
 
-
 def tte_log_err(message):
     """
     Logging with ERROR level
@@ -495,7 +489,9 @@ class EmuSettings():
     end: int = -1
 
     is_load_registers: bool = False
-    is_jump_over_syscalls: bool = False
+    is_skip_interrupts = False
+    is_skip_unloaded_calls = True
+    is_skip_trunk_funcs: bool = False
     is_set_stack_value: bool = False
 
     time_out: int = 0
@@ -519,7 +515,11 @@ class EmuSettingsForm(idaapi.Form):
 
         self.c_configs_group: Optional[ida_kernwin.Form.ChkGroupControl] = None
         self.r_load_register: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
-        self.r_jump_over_syscalls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+
+
+        self.r_skip_interrupts: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+        self.r_skip_unloaded_calls: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
+        self.r_skip_thunk_funcs: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
         self.r_set_stack_value: Optional[ida_kernwin.Form.ChkGroupItemControl] = None
 
         self.i_log_level: Optional[ida_kernwin.Form.DropdownListControl] = None
@@ -542,8 +542,10 @@ TimeTravel Emulator: Emulator Settings
             <Emluate time out    :{i_time_out}>
 
             <load registers:{r_load_register}>
-            <Jump over syscalls:{r_jump_over_syscalls}>
-            <Set stack value:{r_set_stack_value}>{c_configs_group}>
+            <Set stack value:{r_set_stack_value}>
+            <Skip interrupts:{r_skip_interrupts}>
+            <Skip unloaded calls:{r_skip_unloaded_calls}>
+            <Skip thunk functions:{r_skip_thunk_funcs}>{c_configs_group}>
 
             <Log level:{i_log_level}>
             <Log file path:{i_log_file_path}>
@@ -561,7 +563,7 @@ TimeTravel Emulator: Emulator Settings
 
                 'i_emulate_step_limit': self.NumericInput(self.FT_DEC, value=500, swidth = 30),
                 "i_time_out": self.NumericInput(self.FT_DEC, value=0, swidth = 30),
-                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_jump_over_syscalls", "r_set_stack_value")),
+                'c_configs_group': self.ChkGroupControl(("r_load_register", "r_set_stack_value", "r_skip_interrupts", "r_skip_unloaded_calls", "r_skip_thunk_funcs")),
 
 
                 'i_log_level': self.DropdownListControl(
@@ -577,9 +579,10 @@ TimeTravel Emulator: Emulator Settings
         self.Compile()
         self.set_default_values()
 
+
     def _on_form_change(self, fid: int):
         assert self.r_load_register is not None, "r_load_register is not initialized"
-        assert self.r_jump_over_syscalls is not None, "r_jump_over_syscalls is not initialized"
+        assert self.r_skip_thunk_funcs is not None, "r_skip_thunk_funcs is not initialized"
 
         # Init
         if fid == -1:
@@ -587,7 +590,6 @@ TimeTravel Emulator: Emulator Settings
                 self.EnableField(self.r_load_register, False)
             else:
                 self.EnableField(self.r_load_register, True)
-            self.EnableField(self.r_jump_over_syscalls, False) # [ ] TODO: Implement jump over syscalls
 
 
         # Click Yes
@@ -600,10 +602,13 @@ TimeTravel Emulator: Emulator Settings
 
         return 1
 
+
     def set_default_values(self):
         assert self.r_load_register is not None \
-            and self.r_set_stack_value is not None, "r_load_register is not initialized"
-
+            and self.r_set_stack_value is not None \
+            and self.r_skip_interrupts is not None \
+            and self.r_skip_unloaded_calls is not None \
+            and self.r_skip_thunk_funcs is not None \
 
         self.preprocessing_code: str = "mu: unicorn.Uc = emu_executor.get_mu()"
 
@@ -613,7 +618,10 @@ TimeTravel Emulator: Emulator Settings
         else:
             self.r_load_register.checked = False
             self.r_set_stack_value.checked = True
+            self.r_skip_thunk_funcs.checked = True
 
+        self.r_skip_interrupts.checked = True
+        self.r_skip_unloaded_calls.checked = True
 
 
     def _open_select_function_dialog(self, code = 0):
@@ -622,6 +630,7 @@ TimeTravel Emulator: Emulator Settings
             return
 
         self._set_emu_range(target_func.start_ea, target_func.end_ea)
+
 
     def _add_preprocessing_code(self, code = 0):
 
@@ -740,7 +749,9 @@ Preprocessing Code Input
            self.c_configs_group is None or \
            self.i_time_out is None or \
            self.r_load_register is None or \
-           self.r_jump_over_syscalls is None or \
+           self.r_skip_interrupts is None or \
+           self.r_skip_unloaded_calls is None or \
+           self.r_skip_thunk_funcs is None or \
            self.r_set_stack_value is None or \
            self.i_log_level is None or \
            self.i_log_file_path is None:
@@ -749,13 +760,15 @@ Preprocessing Code Input
 
         self.emu_settings.start = self.sim_range_start
         self.emu_settings.end = self.sim_range_end
-        self.emu_settings.count = self.i_emulate_step_limit.value
-        self.emu_settings.time_out = self.i_time_out.value
 
-        # Get values directly from individual ChkInput controls
-        self.emu_settings.is_load_registers = self.r_load_register.checked
-        self.emu_settings.is_jump_over_syscalls = self.r_jump_over_syscalls.checked
-        self.emu_settings.is_set_stack_value = self.r_set_stack_value.checked
+        self.emu_settings.count = self.GetControlValue(self.i_emulate_step_limit) # type: ignore
+        self.emu_settings.time_out = self.GetControlValue(self.i_time_out) # type: ignore
+
+        self.emu_settings.is_load_registers = self.GetControlValue(self.r_load_register) # type: ignore
+        self.emu_settings.is_skip_interrupts = self.GetControlValue(self.r_skip_interrupts) # type: ignore
+        self.emu_settings.is_skip_unloaded_calls = self.GetControlValue(self.r_skip_unloaded_calls) # type: ignore
+        self.emu_settings.is_skip_trunk_funcs = self.GetControlValue(self.r_skip_thunk_funcs) # type: ignore
+        self.emu_settings.is_set_stack_value = self.GetControlValue(self.r_set_stack_value) # type: ignore
 
         self.emu_settings.preprocessing_code = self.preprocessing_code
 
@@ -768,7 +781,8 @@ Preprocessing Code Input
 
         log_level_value: int = self.GetControlValue(self.i_log_level) # type: ignore
         self.emu_settings.log_level = log_level_map.get(log_level_value, logging.WARNING)
-        self.emu_settings.log_file_path = self.i_log_file_path.value
+        self.emu_settings.log_file_path = self.GetControlValue(self.i_log_file_path) # type: ignore
+
 
     def GetSetting(self):
         return self.emu_settings
@@ -777,17 +791,16 @@ Preprocessing Code Input
 
 class EmuExecutor():
     """
-    A simulation executor class is used to manage the operation of the entire program, including initialization, loading, running, saving, etc.
+    A simulation executor class used to manage the operation of the entire program, including initialization, loading, running, saving, etc.
     """
-
-
 
     def __init__(self, settings: EmuSettings) -> None:
         self._is_initialized = False
 
         self.arch = get_arch()
         self.unicorn_arch, self.unicorn_mode = UNICORN_ARCH_MAP[self.arch]
-        self.insn_pointer = ARCH_TO_INSN_POINTER_MAP[self.arch]
+        self.is_be = get_is_be()
+
         self.settings = settings
         tte_log_info("Create EmuExecutor: arch-{}, mode-{}".format(self.unicorn_arch, self.unicorn_mode))
 
@@ -795,6 +808,8 @@ class EmuExecutor():
 
         self.emu_map_mem_callback = []
         self.emu_run_end_callback = []
+        self.mu_hook_handlers = []
+
 
     def init(self) -> None:
         """
@@ -803,7 +818,6 @@ class EmuExecutor():
         if self._is_initialized:
             tte_log_info("EmuExecutor already initialized.")
             return
-
 
         # Unicorn instance creation
         self.mu = unicorn.Uc(self.unicorn_arch, self.unicorn_mode)
@@ -815,9 +829,16 @@ class EmuExecutor():
         self._set_regs_init_value()
 
         # Hooks setting
+        if self.settings.is_skip_interrupts:
+            self._hook_skip_interrupt()
+        if self.settings.is_skip_trunk_funcs:
+            self._hook_skip_thunk_funcs()
+        if self.settings.is_skip_unloaded_calls:
+            self._hook_skip_unloaded_call()
         self._hook_mem_unmapped()
 
         self._is_initialized = True
+
 
     @staticmethod
     def execute_preprocessing_code(preprocessing_code, emu_executor: 'EmuExecutor') -> int:
@@ -826,11 +847,11 @@ class EmuExecutor():
         """
         if(len(preprocessing_code) == 0):
             return 1
-        idaapi.msg("Executing preprocessing code...\n")
+        # idaapi.msg("Executing preprocessing code...\n")
         try:
             exec(preprocessing_code)
         except Exception as e:
-            idaapi.msg(f"Error executing preprocessing code: {e}")
+            idaapi.msg(f"Error executing preprocessing code: {e}\n")
             return idaapi.ask_yn(0, f"Error executing preprocessing code: {e}\nDo you want to continue?")
 
         mem_regions_iter = emu_executor.get_mu().mem_regions()
@@ -842,8 +863,14 @@ class EmuExecutor():
 
         return 1
 
+
     def get_mu(self):
         return self.mu
+
+
+    def add_mu_hook(self, htype: int, callback, user_data = None, begin: int = 1, end: int = 0) -> None:
+        handler = self.mu.hook_add(htype, callback, user_data, begin, end)
+        self.mu_hook_handlers.append(handler)
 
 
     def _is_memory_mapped(self, address) -> bool:
@@ -880,7 +907,7 @@ class EmuExecutor():
         :param load_seg_end: End address of the binary data to load.
         """
 
-        seg_data = ida_bytes.get_bytes(load_seg_start, load_seg_end - load_seg_start)
+        seg_data = ida_bytes.get_bytes(load_seg_start, load_seg_end - load_seg_start + 1)
         if seg_data:
             try:
                 self.mu.mem_write(load_seg_start, seg_data)
@@ -910,7 +937,7 @@ class EmuExecutor():
 
 
     def _hook_mem_unmapped(self) -> None:
-        def cb_map_mem_inmapped(uc, access, address, size, value, user_data) -> bool:
+        def cb_map_mem_unmapped(uc, access, address, size, value, user_data) -> bool:
             if access == UC_MEM_READ_UNMAPPED:
                 tte_log_info(f"Hook callback: Try to read the unmapped memory at 0x{address:X}, size {size}")
             elif access == UC_MEM_WRITE_UNMAPPED:
@@ -920,17 +947,117 @@ class EmuExecutor():
 
             try:
                 tte_log_info(f"Hook callback: Map memory during running: 0x{address:X}, 0x{size:X}")
-
                 self._map_and_load_binary(address, address + size)
-
                 return True
+
             except UcError as e:
                 tte_log_err(f"Hook callback: Mapping memory failed: {e}")
                 return False
 
+        self.add_mu_hook(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, cb_map_mem_unmapped)
 
 
-        self.mu.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, cb_map_mem_inmapped)
+    def _hook_skip_interrupt(self) -> None:
+        def cb_skip_interrupt(uc, intno, user_data) -> bool:
+            tte_log_info(f"Hook callback: Skip interrupt: {intno}")
+            return True
+
+        self.add_mu_hook(UC_HOOK_INTR, cb_skip_interrupt)
+
+
+    def _hook_skip_thunk_funcs(self) -> None:
+
+        def execute_x86_ret(uc):
+            if self.unicorn_mode == UC_MODE_64:
+                stack_pointer_value = uc.reg_read(UC_X86_REG_RSP)
+                return_address_bytearray = uc.mem_read(stack_pointer_value, 8)
+                return_address_int = int.from_bytes(return_address_bytearray, byteorder='big' if self.is_be else 'little',  signed=False)
+
+                uc.reg_write(UC_X86_REG_RIP, return_address_int)
+                uc.reg_write(UC_X86_REG_RSP, stack_pointer_value + 8)
+
+                tte_log_info(f"Hook callback: Jump to return address: 0x{return_address_int:X}")
+                return
+
+            elif self.unicorn_mode == UC_MODE_32:
+                stack_pointer_value = uc.reg_read(UC_X86_REG_ESP)
+                return_address_bytearray = uc.mem_read(stack_pointer_value, 4)
+                return_address_int = int.from_bytes(return_address_bytearray, byteorder='big' if self.is_be else 'little',  signed=False)
+
+                uc.reg_write(UC_X86_REG_EIP, return_address_int)
+                uc.reg_write(UC_X86_REG_ESP, stack_pointer_value + 4)
+
+                tte_log_info(f"Hook callback: Jump to return address: 0x{return_address_int:X}")
+                return
+
+            else:
+                return
+
+        def cb_skip_thunk_func_call(uc, address, size, user_data):
+
+            flags = idc.get_func_attr(address, idc.FUNCATTR_FLAGS)
+            if flags == idaapi.BADADDR:
+                return False
+            is_thunk_function = (flags & idaapi.FUNC_THUNK) != 0
+
+            # If the function is a thunk function, detect the return address on the stack and jump to it.
+            if is_thunk_function:
+                tte_log_info(f"Hook callback: Skip thunk function at 0x{address:X}")
+                if self.unicorn_arch == UC_ARCH_X86:
+                    execute_x86_ret(uc)
+
+        self.add_mu_hook(UC_HOOK_CODE, cb_skip_thunk_func_call)
+
+
+    def _hook_skip_unloaded_call(self) -> None:
+
+        def get_x86_call_target(uc, insn_bytes, address, size):
+            target_address = -1
+            if insn_bytes[0] == 0xE8: # Direct call
+                relative_offset = int.from_bytes(insn_bytes[1:5], byteorder = 'big' if self.is_be else 'little', signed=True)
+                target_address = address + size + relative_offset
+                tte_log_dbg(f"Direct call to 0x{target_address:X}")
+
+            elif insn_bytes[0] == 0xFF: # Indirect call
+                insn = None
+                try:
+                    insn = next(InstrctionParser().parse_instructions(insn_bytes))
+                except StopIteration:
+                    return
+
+                op_str = insn.op_str
+                if '[' not in op_str: # register indirect calls
+                    register_id = UNICORN_REGISTERS_MAP[self.arch].get(op_str.upper(), -1)
+                    if register_id != -1:
+                        target_address = uc.reg_read(register_id)
+
+                else: # memory indirect call
+                    pass # TODO: support memory indirect call calculation
+                    # reg_or_mem = op_str.strip('[]')
+                    # mem_addr = uc.reg_read(self.get_register_id(reg_or_mem))
+                    # target_address = int.from_bytes(uc.mem_read(mem_addr, uc.mode // 8), byteorder='little')
+
+                tte_log_dbg(f"Indirect call to 0x{target_address:X}")
+            return target_address
+
+        def cb_check_call_target_loaded_and_skip(uc, address, size, user_data):
+            insn_bytes = uc.mem_read(address, size)
+
+            target_address = -1
+            if self.unicorn_arch == UC_ARCH_X86:
+                if insn_bytes[0] not in [0xE8, 0xFF]: # Not a call instruction
+                    return False
+                target_address = get_x86_call_target(uc, insn_bytes, address, size)
+
+            if target_address == -1:
+                return
+
+            elif not ida_bytes.is_loaded(target_address):
+                tte_log_dbg(f"Hook callback: Skip unloaded call target: 0x{target_address:X}")
+                current_insn_address = uc.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch])
+                uc.reg_write(ARCH_TO_INSN_POINTER_MAP[self.arch], current_insn_address + size)
+
+        self.add_mu_hook( UC_HOOK_CODE, cb_check_call_target_loaded_and_skip)
 
 
     def _set_regs_init_value(self) -> None:
@@ -950,7 +1077,7 @@ class EmuExecutor():
             tte_log_info(f"Init regs: Sets registers default stack regs value: sp = {DEFAULT_STACK_POINT_VALUE + offset:X}, bp = {DEFAULT_BASE_POINT_VALUE + offset:X}")
 
         elif self.settings.is_load_registers and self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_64:
-            for reg_id, reg_value in get_arch_x64_reg_value().items():
+            for reg_id, reg_value in get_arch_x64_regs_value().items():
                 if reg_value is not None:
                     self.mu.reg_write(reg_id, reg_value)
                     tte_log_info(f"Init regs: Sets register ID {reg_id} value: 0x{reg_value:X}")
@@ -958,16 +1085,13 @@ class EmuExecutor():
                     tte_log_info(f"Init regs: Skip register ID {reg_id} value: None")
 
         elif self.settings.is_load_registers and self.unicorn_arch == UC_ARCH_X86 and self.unicorn_mode == UC_MODE_32:
-            for reg_id, reg_value in get_arch_x86_reg_value().items():
+            for reg_id, reg_value in get_arch_x86_regs_value().items():
                 if reg_value is not None:
                     self.mu.reg_write(reg_id, reg_value)
                     tte_log_info(f"Init regs: Sets register ID {reg_id} value: 0x{reg_value:X}")
                 else:
                     tte_log_info(f"Init regs: Skip register ID {reg_id} value: None")
 
-
-    def add_mu_hook(self, htype: int, callback, user_data = None, begin: int = 1, end: int = 0) -> int:
-        return self.mu.hook_add(htype, callback, user_data, begin, end)
 
     CUSTOM_HOOK_MEM_MAP = 0
     CUSTOM_HOOK_EXECUTE_END = 1
@@ -993,10 +1117,7 @@ class EmuExecutor():
         except UcError as e:
             tte_log_err(f"Emulation failed: {e}")
 
-
-
-
-        tte_log_info(f"Emulation ended: 0x{self.mu.reg_read(self.insn_pointer):X}")
+        tte_log_info(f"Emulation ended: 0x{self.mu.reg_read(ARCH_TO_INSN_POINTER_MAP[self.arch]):X}")
         tte_log_dbg("Emulation: Start calling end callback functions.")
         for callback in self.emu_run_end_callback:
             callback(self.mu)
@@ -1012,6 +1133,9 @@ class EmuExecutor():
             return
 
         self.mu.emu_stop()
+        for handler in self.mu_hook_handlers:
+            self.mu.hook_del(handler)
+
         self.emu_run_end_callback.clear()
         self.emu_map_mem_callback.clear()
         self.loaded_pages.clear()
@@ -1623,7 +1747,7 @@ class EmuTracer():
 
     def cb_catch_insn_execution(self, uc, address, size, user_data) -> bool:
         tte_log_dbg(message=f"Tracing instruction at 0x{address:X}, instruction size = {size:X}")
-        _, _, opcode, operand = next(self.md.disasm_lite(uc.mem_read(address, size), 0))
+        opcode, operand = InstrctionParser().parse_instruction_to_tuple(uc.mem_read(address, size))
         tte_log_dbg("Executing instruction:    %s\t%s" % (opcode, operand))
         self.state_buffer.instruction = bytes(uc.mem_read(address, size))
         return True
@@ -1639,13 +1763,14 @@ class EmuTracer():
         Create a new simulated state in the state buffer
         """
 
+        # Save the current state to the state buffer
         self.state_manager.create_state(uc,
                                         self.state_buffer.instruction,
                                         address,
                                         self.executor.get_mem_regions(),
                                         self.state_buffer.memory_patches)
 
-        # Save the current state to the state buffer
+        # Create a new state buffer
         self.state_buffer.memory_patches = []
 
         return True
@@ -1682,7 +1807,7 @@ class EmuTracer():
     def cb_mark_mem_map(self, uc):
         """
         Callback function to mark that the binary has been loaded.
-        This is used to determine whether to create a full state or a patch state.
+        This is used to determine which type of state to create next time.
         """
 
         self.state_manager.has_map_memory = True
@@ -1711,10 +1836,12 @@ class InstrctionParser():
         self.capstone_arch, self.capstone_mode = CAPSTONE_ARCH_MAP[self.arch]
         self.md = Cs(self.capstone_arch, self.capstone_mode)
 
+    def parse_instructions(self, insn_bytes: bytes):
+        return self.md.disasm(insn_bytes, 0)
 
-    def parse_instruction(self, insn_bytes: bytes) -> str:
+    def parse_instruction_to_str(self, insn_bytes: bytes) -> str:
         """
-        Parses an instruction and returns a tuple of (opcode, operand)
+        Parses an instruction and returns a string of the form "opcode operand"
         """
         assert self.md is not None, "InstrctionParser not initialized"
         try:
@@ -1723,6 +1850,16 @@ class InstrctionParser():
         except StopIteration:
             return ""
 
+    def parse_instruction_to_tuple(self, insn_bytes: bytes) -> Tuple[str, str]:
+        """
+        Parses an instruction and returns a tuple of (opcode, operand)
+        """
+        assert self.md is not None, "InstrctionParser not initialized"
+        try:
+            _, _, opcode, operand = next(self.md.disasm_lite(insn_bytes, 0))
+            return opcode,operand
+        except StopIteration:
+            return "", ""
 
 
 
@@ -1869,7 +2006,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
             action_handler.unregister()
         self.menu_action_handlers.clear()
 
-
     def Show(self):
         self.CheckRebuild()
         return super().Show()
@@ -2005,7 +2141,6 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
     def UpdateLine(self, address, address_idx, address_type, line, fgcolor=None, bgcolor=None):
         """
         Updates an existing line identified by its binary address.
-        or inserts a new line if it does not exist.
 
         :return: Boolean indicating success.
         """
@@ -2019,30 +2154,21 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
                 line_info.address_idx == address_idx:
                 return self.EditLine(address, address_idx, address_type, line, fgcolor, bgcolor)
             else:
-                self.DelLine(address, lazy=False)
-                return self.InsertLine(address, address_type, line, fgcolor, bgcolor)
+                return False
         return False
 
 
     def UpdateLineRange(self, address, length, address_type, line, fgcolor=None, bgcolor=None):
         """
-        Updates an existing line identified by its binary address.
-        or inserts a new line if it does not exist.
+        Deletes an existing line range identified by its binary address range.
+        and inserts a new line.
 
         :return: Boolean indicating success.
         """
         self.CheckRebuild()
-        target_line_info = address_line_info(address=address, address_idx=0)
-        lineno_to_edit = self._lines_data.bisect_left(target_line_info)
-        if lineno_to_edit < len(self._lines_data):
-            line_info: address_line_info = self._lines_data[lineno_to_edit] # type: ignore
-            if line_info.address == address and \
-                line_info.address_idx == 0:
-                # Del the entire range
-                for offset in range(length):
-                    self.DelLine(address + offset, lazy=False)
-                return self.InsertLine(address, address_type, line, fgcolor, bgcolor)
-        return False
+        for offset in range(length):
+            self.DelLine(address + offset, lazy=False)
+        return self.InsertLine(address, address_type, line, fgcolor, bgcolor)
 
 
     def PatchLine(self, address, address_idx, offs, value):
@@ -2140,10 +2266,10 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
 
     def GetLineNo(self, mouse = 0):
         """
-        Returns the binary address of the current line.
+        Returns the index of the current line or None if no line is selected.
 
         :param mouse: return mouse position.
-        :return: Returns the binary address or None on failure.
+        :return: Returns the line number or None on failure.
         """
         self.CheckRebuild()
         lineno = super().GetLineNo(mouse)
@@ -2212,7 +2338,7 @@ class AddressAwareCustomViewer(ida_kernwin.simplecustviewer_t):
     #     return self._JumpToWord(dblclick_word)
 
 
-    def SetDblChickCallback(self, callback):
+    def SetDblClickCallback(self, callback):
         self.dbl_click_callback = callback
 
 
@@ -2288,11 +2414,13 @@ class ColorfulLineGenerator():
         else:
             execution_counts_str = ida_lines.COLSTR(f"{execution_counts: 4}", ida_lines.SCOLOR_REGCMT)
 
-        addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
         if not generate_by_capstone:
+            addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_PREFIX)
             insn = ida_lines.generate_disasm_line(address)
         else:
-            insn = InstrctionParser().parse_instruction(value)
+            addr_str = ida_lines.COLSTR(f"0x{address:0{address_len}X}", ida_lines.SCOLOR_IMPNAME)
+            opcode, operand = InstrctionParser().parse_instruction_to_tuple(value)
+            insn = ida_lines.COLSTR(opcode, ida_lines.SCOLOR_INSN) + "     " + ida_lines.COLSTR(operand, ida_lines.SCOLOR_DNAME)
         return f"{execution_counts_str} {addr_str}  {insn}"
 
     @staticmethod
@@ -2364,10 +2492,11 @@ class TTE_DisassemblyViewer():
 
     To use it following the steps:
     1. Use self.InitViewer() to initializate the viewer.
-    2. Set data: including self.memory_pages_list and self.execution_counts
-    3. Add self.viewer_widget to TimeTravelEmuViewer's layout.
-    4. Use self.DisplayMemoryRange to display memory pages in range.
-    5. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
+    2. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    3. Use self.LoadListFromESM() to statistics execution counts of code lines.
+    4. Use self.LoadState() to load state data, including self.memory_pages_list and self.execution_counts
+    5. Use self.DisplayMemoryRange() to display memory pages in range.
+    6. Call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
     """
 
     title = "TimeTravelEmuDisassemblyViewer"
@@ -2385,6 +2514,7 @@ class TTE_DisassemblyViewer():
 
         self.execution_counts = None
         self.codelines_dict:Dict[int, int] = {}  # {address : address_idx)}
+        self.capstone_lines: Dict[int, Tuple[bytes, int, str]] = {} # {address : (code_size, capstone_insn_str)}
 
 
         self.current_state = None
@@ -2398,7 +2528,6 @@ class TTE_DisassemblyViewer():
         self.hightlighting_lines: List[Tuple[int, int, Optional[int]]] = [] # [(address, lineno, color),...]
         self.code_lines_comments: List[Tuple[int, bool, str]] = [] # [(address, has_show, comment),...]
 
-
     def InitViewer(self):
         self.viewer.Create(self.title)
         self.viewer_widget  = ida_kernwin.PluginForm.FormToPyQtWidget(self.viewer.GetWidget())
@@ -2407,11 +2536,16 @@ class TTE_DisassemblyViewer():
         self._SetMenuActions()
 
 
-    def GetCursorAddress(self):
-        lineno =  self.viewer.GetLineNo()
-        if lineno is not None:
-            return self.viewer.GetAddressFromLineNo(lineno)
-        return None
+    def _SetCustomViewerStatusBar(self):
+        # Remove original status bar
+        viewer_status_bar = self.viewer_widget.findChild(QtWidgets.QStatusBar)
+        for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
+            viewer_status_bar.removeWidget(widget)
+
+        self.statusbar_state_id_qlabel = QtWidgets.QLabel("[Status: N\\A ]")
+        viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
+        self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Memory Range: N\\A )")
+        viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
 
 
     def _SetDoubleClickCallback(self):
@@ -2452,7 +2586,14 @@ class TTE_DisassemblyViewer():
                 return True
             return False
 
-        self.viewer.SetDblChickCallback(OnDblClickAction)
+        self.viewer.SetDblClickCallback(OnDblClickAction)
+
+
+    def GetCursorAddress(self):
+        lineno =  self.viewer.GetLineNo()
+        if lineno is not None:
+            return self.viewer.GetAddressFromLineNo(lineno)
+        return None
 
 
     def _SetMenuActions(self):
@@ -2504,6 +2645,9 @@ class TTE_DisassemblyViewer():
 
 
     def RefreshAction(self):
+        self.ClearHighlightLines()
+        self.ClearCodeLinesComments()
+
         self.DisplayMemoryRange(self.current_range_display_start, self.current_range_display_end)
 
 
@@ -2514,6 +2658,7 @@ class TTE_DisassemblyViewer():
             if target_addr:
                 self.JumpTo(target_addr)
         return None
+
 
     def SetDisplayMemoryRangeAction(self):
         assert self.memory_pages_list, "State data not loaded"
@@ -2548,26 +2693,28 @@ class TTE_DisassemblyViewer():
 
         form = RangeInputForm(self.current_range_display_start,self.current_range_display_end)
         IsSet = form.Execute()
-        if IsSet is not None:
-            range_start = form.start_addr
-            range_end = form.end_addr
-            self.DisplayMemoryRange(range_start, range_end)
+        if IsSet == 1:
+            range_start: int = form.start_addr # type: ignore
+            range_end: int = form.end_addr # type: ignore
+
+            if range_start > range_end:
+                idaapi.warning("Invalid range, start address should be less than end address")
+            elif range_end - range_start > 16 * PAGE_SIZE:
+                ok = idaapi.ask_yn(0, f"The range is too large, do you want to continue? (Range: {range_start:X} - {range_end:X})")
+                if ok == 1:
+                    self.DisplayMemoryRange(range_start, range_end)
+            else:
+                self.DisplayMemoryRange(range_start, range_end)
         form.Free()
 
 
-    def _SetCustomViewerStatusBar(self):
-        # Remove original status bar
-        viewer_status_bar = self.viewer_widget.findChild(QtWidgets.QStatusBar)
-        for widget in viewer_status_bar.findChildren(QtWidgets.QLabel):
-            viewer_status_bar.removeWidget(widget)
-
-        self.statusbar_state_id_qlabel = QtWidgets.QLabel("[Status: N\\A ]")
-        viewer_status_bar.addWidget(self.statusbar_state_id_qlabel)
-        self.statusbar_memory_range_qlabel = QtWidgets.QLabel("(Memory Range: N\\A )")
-        viewer_status_bar.addWidget(self.statusbar_memory_range_qlabel)
-
-
     def LoadListFromESM(self, state_list: StateList):
+        """
+        Load execution counts from StateList.
+
+        Here it is believed that the state list is arranged in the order in which it was created,
+        so the execution counts of the later record must be greater than the number of previous records in the same address, and can be directly overwritten.
+        """
         self.execution_counts= {state.instruction_address: state.execution_count for _, state in state_list}
 
 
@@ -2634,8 +2781,9 @@ class TTE_DisassemblyViewer():
                                         line.bgcolor)
 
 
-    def HighlightCurrentInsn(self):
+    def MarkCurrentInsn(self):
         assert self.current_state is not None, "State not loaded"
+        assert self.memory_pages_list, "State data not loaded"
 
         if self.current_insn_address > 0 and self.current_insn_address >= self.current_range_display_start and self.current_insn_address < self.current_range_display_end:
             # Highlight current instruction in memory range.
@@ -2647,14 +2795,21 @@ class TTE_DisassemblyViewer():
                 if self.execution_counts and self.current_insn_address in self.execution_counts:
                     count = self.execution_counts[self.current_insn_address]
                 if len(self.current_state.instruction) != 0:
-                    self.viewer.UpdateLineRange(self.current_insn_address, len(self.current_state.instruction), SINGLE_DATA_LINE,
-                                        ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
-                                                                                            self.addr_len,
-                                                                                            self.current_state.instruction,
-                                                                                            len(self.current_state.instruction),
-                                                                                            count,
-                                                                                            True),
-                                                                                            None, None)
+                    code_bytes = self.current_state.instruction
+                    code_size = len(code_bytes)
+                    line_text = ColorfulLineGenerator.GenerateDisassemblyCodeLine(self.current_insn_address,
+                                                                                              self.addr_len,
+                                                                                              code_bytes,
+                                                                                              code_size,
+                                                                                              count,
+                                                                                              True)
+                    self.capstone_lines[self.current_insn_address] = (code_bytes, code_size, line_text)
+                    self.viewer.UpdateLineRange(self.current_insn_address,
+                                                len(self.current_state.instruction),
+                                                SINGLE_DATA_LINE,
+                                                line_text,
+                                                None,
+                                                None)
 
 
 
@@ -2695,11 +2850,11 @@ class TTE_DisassemblyViewer():
                         line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1)
                         self.viewer.EditLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
                     else:
-                        line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1)
+                        line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(addr, self.addr_len, value, 1) # TODO: fix this line_text when data size > 1
                         self.viewer.UpdateLine(addr, 0, SINGLE_DATA_LINE, line_text, None, None)
                 self.hightlighting_lines.append((addr, 0, CHANGE_HIGHLIGHT_COLOR))
 
-        self.HighlightCurrentInsn()
+        self.MarkCurrentInsn()
         self.HighlightLines()
         self.ShowCodeLinesComments()
         self.viewer.Refresh()
@@ -2742,6 +2897,7 @@ class TTE_DisassemblyViewer():
 
                 current_addr_flag = ida_bytes.get_flags(current_addr)
 
+                # If the current address has a name, display it in a separate line.
                 is_named = ida_bytes.has_any_name(current_addr_flag)
                 if is_named:
                     empty_line_text = ColorfulLineGenerator.GenerateEmptyLine(current_addr, self.addr_len)
@@ -2750,11 +2906,13 @@ class TTE_DisassemblyViewer():
                     self.viewer.AddLine(current_addr, NAME_LINE, line_text)
                     address_idx += 2
 
+                # If the data at the current address is recognized as code.
                 if idc.is_code(current_addr_flag):
                     code_size = idc.get_item_size(current_addr)
+                    offset = current_addr - start_addr
                     line_text = ColorfulLineGenerator.GenerateDisassemblyCodeLine(current_addr,
                                                                                        self.addr_len,
-                                                                                       data[current_addr - start_addr],
+                                                                                       data[offset : offset + code_size],
                                                                                        code_size,
                                                                                        count)
                     self.viewer.AddLine(current_addr, CODE_LINE, line_text)
@@ -2762,7 +2920,17 @@ class TTE_DisassemblyViewer():
                     current_addr += code_size
                     continue
 
-                elif idc.is_data(current_addr_flag):
+                # If the data at the current address isn't recognized as code, but cached at capstone line dict and has the same bytes.
+                if current_addr in self.capstone_lines.keys():
+                    code_bytes, code_size, line_text = self.capstone_lines[current_addr]
+                    if code_bytes == data[current_addr - start_addr : current_addr - start_addr + code_size]:
+                        self.viewer.AddLine(current_addr, CODE_LINE, line_text)
+                        self.codelines_dict[current_addr] = address_idx
+                        current_addr += code_size
+                        continue
+
+                # If the data at the current address is recognized as data.
+                if idc.is_data(current_addr_flag):
                     data_size = idc.get_item_size(current_addr)
                     offset = current_addr - start_addr
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr,
@@ -2776,6 +2944,8 @@ class TTE_DisassemblyViewer():
 
                     current_addr += data_size
                     continue
+
+                # Unknown address type.
                 else:
                     line_text = ColorfulLineGenerator.GenerateDisassemblyDataLine(current_addr,
                                                                                   self.addr_len,
@@ -2795,7 +2965,7 @@ class TTE_DisassemblyViewer():
         self.current_range_display_start = range_start
         self.current_range_display_end = range_end
 
-        self.HighlightCurrentInsn()
+        self.MarkCurrentInsn()
         self.HighlightLines()
         self.ShowCodeLinesComments()
         self.viewer.Refresh()
@@ -2809,10 +2979,11 @@ class TTE_RegistersViewer:
     a subviewer class of TimeTravelEmuViewer to display registers.
 
     To use it following the steps:
-    1. use self.InitViewer() to initializate the viewer.
-    2. use self.LoadRegisters() to load registers lines
-    3. add self.viewer_widget to TimeTravelEmuViewer's layout.
-    4. call TimeTravelEmuViewer.Show() to show viewer with the subviewer.
+    1. Use self.InitViewer() to initializate the viewer.
+    2. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    3. Use self.SetRegisters() to load registers values for a specific state.
+    4. Use self.DisplayRegisters() to display the registers values.
+    5. Call TimeTravelEmuViewer.Show() to show the viewer with this subviewer.
     """
 
     title = "TimeTravelEmuRegistersViewer"
@@ -2822,7 +2993,7 @@ class TTE_RegistersViewer:
             super().__init__()
             self.dbl_click_callback = None
 
-        def SetDblChickCallback(self, callback):
+        def SetDblClickCallback(self, callback):
             self.dbl_click_callback = callback
 
         def OnDblClick(self, shift):
@@ -2853,8 +3024,8 @@ class TTE_RegistersViewer:
         self._SetCustomViewerStatusBar()
 
 
-    def SetDblChickCallback(self, callback):
-        self.viewer.SetDblChickCallback(callback)
+    def SetDblClickCallback(self, callback):
+        self.viewer.SetDblClickCallback(callback)
 
 
     def _SetCustomViewerStatusBar(self):
@@ -2907,8 +3078,8 @@ class TTE_MemoryViewer:
 
     To use it, follow these steps:
     1. Use self.InitViewer() to initialize the viewer.
-    2. Use self.LoadState() to load memory pages for a specific state.
-    3. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    2. Add self.viewer_widget to TimeTravelEmuViewer's layout.
+    3. Use self.LoadState() to load memory pages for a specific state.
     4. Use self.DisplayMemoryRange() to display a specific memory range.
     5. Call TimeTravelEmuViewer.Show() to show the viewer with this subviewer.
     """
@@ -3000,12 +3171,14 @@ class TTE_MemoryViewer:
             """
             Action: If user double-clicks an address, jump to it in IDA View.
             """
-            addr = custom_viewer.GetLineNo() # Get the address of the clicked line
-            if addr is not None and addr != idaapi.BADADDR:
-                return idaapi.jumpto(addr)
+            lineno = custom_viewer.GetLineNo() # Get the line number of the clicked line
+            if lineno is not None:
+                addr = custom_viewer.GetAddressFromLineNo(lineno) # Get the address of the clicked line
+                if addr is not None:
+                    return idaapi.jumpto(addr)
             return False
 
-        self.viewer.SetDblChickCallback(OnDblClickAction)
+        self.viewer.SetDblClickCallback(OnDblClickAction)
 
 
     def _SetMenuActions(self):
@@ -3021,6 +3194,7 @@ class TTE_MemoryViewer:
         self.viewer.AddAction(MenuActionHandler(self.title, lambda : True,
                               f"{self.title}:ExportSelectedMemoryAction",
                               self.ExportSelectedMemoryAction, "Export selected memory", "E"))
+
 
     def AddMenuActions(self, action_handler: MenuActionHandler):
         action_handler.parent_title = self.title
@@ -3116,10 +3290,18 @@ class TTE_MemoryViewer:
         # Use current display range as default for the input form
         form = RangeInputForm(self.current_range_display_start, self.current_range_display_end)
         IsSet = form.Execute()
-        if IsSet is not None:
-            range_start = form.start_addr
-            range_end = form.end_addr
-            self.DisplayMemoryRange(range_start, range_end)
+        if IsSet == 1:
+            range_start: int = form.start_addr # type: ignore
+            range_end: int = form.end_addr # type: ignore
+
+            if range_start > range_end:
+                idaapi.warning("Invalid range, start address should be less than end address")
+            elif range_end - range_start > 16 * PAGE_SIZE:
+                ok = idaapi.ask_yn(0, f"The range is too large, do you want to continue? (Range: {range_start:X} - {range_end:X})")
+                if ok == 1:
+                    self.DisplayMemoryRange(range_start, range_end)
+            else:
+                self.DisplayMemoryRange(range_start, range_end)
         form.Free()
 
 
@@ -3402,7 +3584,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.registers_viewer.InitViewer()
         self.mempages_viewer.InitViewer()
 
-        self.SetDoubleClickCallback()
+        self.SetRegsViewerDoubleClickCallback()
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:NextStateAction",
@@ -3434,7 +3616,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
 
         self.disassembly_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.disassembly_viewer.title}:ToggleFollowCurrentInstructionAction",
-                              self.ToggleFollowCurrentInstructionAction, "Toggle follow current instruction (F)", "F"))
+                              self.ToggleFollowCurrentInstructionAction, "Toggle follow current instruction", "F"))
 
         self.mempages_viewer.AddMenuActions(MenuActionHandler(None, lambda : True,
                               f"{self.mempages_viewer.title}:ChooseMemoryPagesAction",
@@ -3445,7 +3627,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                               lambda : self.ShowDiffsAciton(self.mempages_viewer.title, self.mempages_viewer.JumpTo),   "Show diff", "D"))
 
 
-    def SetDoubleClickCallback(self):
+    def SetRegsViewerDoubleClickCallback(self):
         """
         Set a double click callback for mempages_viewer to allow user to jump to address in disassembly_viewer.
 
@@ -3475,7 +3657,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
                     pass
             return False
 
-        self.registers_viewer.SetDblChickCallback(OnDblClickAction)
+        self.registers_viewer.SetDblClickCallback(OnDblClickAction)
 
 
     def OnCreate(self, form):
@@ -3488,9 +3670,18 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
         self.disassembly_viewer.UnregisterAction()
         self.mempages_viewer.UnregisterAction()
 
+        del self.disassembly_viewer
+        del self.registers_viewer
+        del self.mempages_viewer
+
         for sub_chooser in self.subchooser_list:
             if sub_chooser:
                 sub_chooser.Close()
+
+        del self.subchooser_list
+        del self.state_manager
+        del self.state_list
+
 
 
     def LoadESM(self, state_manager: EmuStateManager):
@@ -3589,7 +3780,7 @@ class TimeTravelEmuViewer(ida_kernwin.PluginForm):
             def OnInit(self):
                 self.items = [[str(i),
                         state_id,
-                        InstrctionParser().parse_instruction(state.instruction)]
+                        InstrctionParser().parse_instruction_to_str(state.instruction)]
                         for i, (state_id, state) in enumerate(self.state_list)]
                 return True
 
@@ -3944,7 +4135,7 @@ class TimeTravelEmulator(idaapi.plugin_t):
         pass
 
     def init(self):
-        idaapi.msg("[TimeTravelEmulator] Init\n")
+        idaapi.msg(f"[TimeTravelEmulator] Init (version {VERSION})\n")
         arch = get_arch()
         if arch != "":
             # Supported architecture found.

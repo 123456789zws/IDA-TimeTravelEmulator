@@ -7,20 +7,20 @@
 [English](README.md) | 中文
 
 
-## Features
+## 功能特性
 
 * **基于Unicorn的仿真引擎**：集成 Unicorn 仿真框架，用于在 IDA Pro 中执行代码片段或整个函数。
 * **全面的状态捕获**：记录执行每条指令时CPU寄存器和内存变化的详细快照。
 * **时间回溯调试**：
     * **前进和后退导航**：无缝地前进（F3）和后退（F2）执行历史记录。
     * **状态切换**：跳转到任何已捕获的程序状态（Q），分析特定时间点的确切条件。
-    * **基于状态ID的切换**：通过唯一的 `state_id` 跳转到任何已捕获的程序状态（I）。`state_id` 格式为 `$<指令地址>#<执行次数>`，可精确导航。
-* **差异可视化** ：在状态之间切换时，插件会突出显示插件界面中的内存和寄存器差异，
-* **内存和寄存器跟踪**：提供对程序执行过程中内存和寄存器值变化的可视化。
+    * **基于状态ID的切换**：通过唯一的 `state_id` 跳转（I）到任何已捕获的程序状态(`state_id` 格式为 `$<指令地址>#<执行次数>`)，以实现精确导航。
+* **差异可视化** ：在状态之间切换时，插件会高亮显示插件界面中的内存和寄存器差异，
+* **内存和寄存器跟踪**：提供对程序执行过程中内存和寄存器值变化的可见性。
 * **可配置的仿真**：
     * 设置自定义仿真范围（起始地址和结束地址）。
-    * 从当前调试器状态加载初始寄存器值（如果已连接）。
-    * 配置仿真步数限制和超时。
+    * 从当前调试器状态加载初始寄存器值（在调试模式下生效）。
+    * 配置仿真步数限制和时间限制。
     * 设置自定义的预处理代码，以设置 Unicorn 环境。
 
 
@@ -39,7 +39,7 @@
 
 ## 快速入门
 
-<img width="493" height="535" alt="image" src="https://github.com/user-attachments/assets/8eba2efd-e6ad-4527-b6e5-aa0e5ddcf094" />
+<img width="483" height="585" alt="image" src="https://github.com/user-attachments/assets/315d56fe-7599-49b0-a9c1-b2285d43b8a8" />
 
 按下快捷键 `Shift+T` 打开 `EmuTrace: Emulator Settings` (模拟器设置) 对话框。
 
@@ -78,8 +78,7 @@ int main() {
 用于仿真的示例程序源代码。
 
 ### 模拟器设置对话框
-
-<img width="2333" height="1070" alt="image" src="https://github.com/user-attachments/assets/20857a2e-1f05-4e07-b3f4-ca401d483b0e" />
+<img width="2312" height="1281" alt="image" src="https://github.com/user-attachments/assets/f30f80ac-c19a-4dc0-9fd0-a61201993bf1" />
 
 选择要仿真的代码并使用快捷键 `Shift+T` 打开仿真设置对话框。
 
@@ -91,19 +90,23 @@ int main() {
 * **Emulate time out**: 模拟运行的运行时间限制
 
 * **load registers**: 是否加载当前的寄存器值(在调试模式下生效)
-* **Jump over syscalls**: 是否跳过系统调用函数(TODO: 暂时未实现)
-- **Set Stack value**: 是否设置特殊的栈帧寄存器值
+* **Set Stack value**: 是否设置特殊的栈帧寄存器值
+
+* **Skip interrupts**：在模拟过程中跳过`int`指令
+* **Skip unloaded calls**：跳过目标地址未被加载的`call`指令
+* **Skip thunk functions**：在模拟过程中跳过thunk函数
 
 * **Log level & Log file path**: 日志记录等级和保存位置
 
-<img width="1433" height="867" alt="image" src="https://github.com/user-attachments/assets/ffef8d4e-f2db-43cb-b2d0-3f12c3082b6b" />
+<img width="1652" height="971" alt="image" src="https://github.com/user-attachments/assets/a57468de-f946-448c-8bcd-8300ef4d79e9" />
 
 * **Set custom preprocessing code**: 设置自定义的预处理代码，这些代码将会在模拟运行前执行。你可以使用此功能提前设置内存、寄存器值或添加Hook
 
 
 ### 时间旅行仿真器视图
 
-![Opening Time Travel Emulator View](https://github.com/user-attachments/assets/02d625d2-fac3-4271-a58d-1325fca32318)
+![Opening Time Travel Emulator View](https://github.com/user-attachments/assets/51ed9758-250c-44a7-a5b5-a98a99dfd250)
+
 
 点击 "Emulate" 开始仿真。仿真完成后，将打开一个新窗口，显示从第一个模拟状态开始的反汇编、寄存器和内存视图。
 
@@ -117,7 +120,7 @@ int main() {
   * `F3`: 移动到下一个录制的状态。
   * `F2`: 移动到上一个录制的状态。
   * `Q`:  跳转到光标所在指令处的状态。
-  * `I`:  提示输入 state_id（例如，$401000#5）以跳转到特定状态。
+  * `I`:  提示输入 state_id（例如，$0x401000#5）以跳转到特定状态。
 
 #### 寄存器视图和内存视图
 
@@ -164,7 +167,7 @@ int main() {
 
 #### 调试模式
 
-![Deubugging registers load](https://github.com/user-attachments/assets/b55cc289-dfd4-4574-b066-1440192b221f)
+<img width="2552" height="921" alt="image" src="https://github.com/user-attachments/assets/e0d2697b-3260-4e67-8aeb-8ddcaec43a80" />
 
 该插件支持在 IDA 的调试模式下进行仿真，并可以自动加载当前寄存器值。
 
